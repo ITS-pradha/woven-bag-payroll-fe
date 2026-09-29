@@ -1,0 +1,86 @@
+{
+  "name": "@woven-payroll/frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "VITE_ENABLE_API_MOCKING=true VITE_API_BASE_URL=/api/v1 vite --host 127.0.0.1 --port 4174",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b",
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test",
+    "playwright:install": "PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright install chromium",
+    "api:generate": "openapi-typescript ../../../../prototype/docs/openapi-v1.yaml -o src/api/generated/schema.ts",
+    "dev:mock:preview": "VITE_ENABLE_API_MOCKING=true VITE_API_BASE_URL=/api/v1 vite --host 127.0.0.1",
+    "templates:build": "node scripts/build-manual-data-template.mjs"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.102.8",
+    "@univerjs/core": "0.25.1",
+    "@univerjs/data-validation": "0.25.1",
+    "@univerjs/design": "0.25.1",
+    "@univerjs/docs": "0.25.1",
+    "@univerjs/docs-ui": "0.25.1",
+    "@univerjs/engine-formula": "0.25.1",
+    "@univerjs/engine-render": "0.25.1",
+    "@univerjs/sheets": "0.25.1",
+    "@univerjs/sheets-data-validation": "0.25.1",
+    "@univerjs/sheets-data-validation-ui": "0.25.1",
+    "@univerjs/sheets-formula": "0.25.1",
+    "@univerjs/sheets-formula-ui": "0.25.1",
+    "@univerjs/sheets-numfmt": "0.25.1",
+    "@univerjs/sheets-numfmt-ui": "0.25.1",
+    "@univerjs/sheets-ui": "0.25.1",
+    "@univerjs/ui": "0.25.1",
+    "fflate": "0.8.3",
+    "openapi-fetch": "^0.17.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router-dom": "^7.18.3",
+    "rxjs": "^7.8.2",
+    "zod": "^4.6.1"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/node": "^22.20.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "eslint": "^10.10.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.6",
+    "globals": "^17.12.0",
+    "jsdom": "^30.0.1",
+    "msw": "^2.15.0",
+    "openapi-typescript": "^7.13.0",
+    "prettier": "^3.9.6",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0"
+  },
+  "overrides": {
+    "nanoid": "5.1.16"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
+  }
+}

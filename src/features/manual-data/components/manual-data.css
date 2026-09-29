@@ -1,0 +1,1197 @@
+#main-content:has(> .manual-page) {
+  max-width: none;
+  padding: 0.25rem 0 1rem;
+}
+
+.manual-page {
+  min-width: 0;
+}
+.manual-control-bar {
+  display: flex;
+  align-items: end;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+  padding-inline: 0.25rem;
+}
+.manual-page-title {
+  display: flex;
+  min-width: max-content;
+  align-items: center;
+  gap: 0.25rem;
+  padding-bottom: 0.25rem;
+}
+/* Terbaca pembaca layar, tidak memakan ruang di layar. */
+.manual-page-heading {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.manual-mode-badge {
+  border: 1px solid var(--color-info-border);
+  border-radius: 0.25rem;
+  padding: 0.125rem 0.375rem;
+  background: var(--color-info-soft);
+  color: var(--color-info-strong);
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+.manual-page label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+.manual-page input:not([type="checkbox"]),
+.manual-page select,
+.manual-page textarea {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  min-height: 2rem;
+  background: var(--color-surface);
+  color: var(--color-foreground);
+  font-size: 0.8125rem;
+  font-weight: 400;
+}
+.manual-page input:disabled {
+  background: var(--color-surface-muted);
+  color: var(--color-muted);
+}
+.manual-btn {
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  min-height: 2rem;
+  background: var(--color-surface);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.manual-btn:hover:not(:disabled) {
+  background: var(--color-surface-muted);
+}
+.manual-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.manual-btn.manual-primary {
+  background: var(--color-brand);
+  color: white;
+  border-color: var(--color-brand);
+}
+.manual-btn.manual-primary:hover:not(:disabled) {
+  background: var(--color-brand-strong);
+}
+.manual-btn.manual-danger {
+  border-color: var(--color-danger);
+  background: var(--color-danger);
+  color: white;
+}
+.manual-btn.manual-danger:hover:not(:disabled) {
+  filter: brightness(0.9);
+}
+/*
+  Destructive but rare, and guarded by its own confirmation: it gets the red
+  of what it does, not the filled weight of the page's main action. Filled,
+  "Tutup buku" out-shouted Simpan in the one column both live in.
+*/
+.manual-btn.manual-danger-quiet {
+  border-color: color-mix(
+    in srgb,
+    var(--color-danger) 45%,
+    var(--color-border)
+  );
+  color: var(--color-danger);
+}
+.manual-btn.manual-danger-quiet:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-danger) 8%, var(--color-surface));
+}
+.manual-btn:focus-visible,
+.manual-page select:focus-visible,
+.manual-page input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 1px;
+}
+.manual-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.manual-filters {
+  display: flex;
+  flex: 1;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+/*
+  Buku periode adalah konteks halaman, bukan satu filter di antara filter lain:
+  judul, status, dan aksinya satu baris, pilihannya selebar tempatnya. Label
+  yang terpotong berarti dua buku yang berbeda terlihat sama.
+*/
+.manual-book {
+  display: grid;
+  gap: 0.25rem;
+  flex: 0 1 24rem;
+  min-width: 0;
+}
+.manual-book-head {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 1.75rem;
+}
+.manual-search {
+  display: flex;
+  flex: 1 1 14rem;
+  gap: 0.1875rem;
+  min-width: 0;
+  margin: 0;
+}
+.manual-period-badge {
+  border-radius: 999px;
+  padding: 0 0.4375rem;
+  font-size: 0.6875rem;
+  line-height: 1.125rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.manual-period-open {
+  border: 1px solid var(--color-success-border);
+  background: var(--color-success-soft);
+  color: var(--color-success-strong);
+}
+/*
+  Kuning, bukan merah. Buku yang sudah tutup adalah keadaan normal — sebagian
+  besar buku memang tutup — sementara merah di layar ini sudah dipakai untuk
+  hal yang harus ditindaklanjuti sekarang (impor gagal, sel bermasalah).
+  Mewarnainya merah membuat alarm yang sebenarnya jadi tidak terlihat.
+*/
+.manual-period-closed {
+  border: 1px solid var(--color-warning-border);
+  background: var(--color-warning-soft);
+  color: var(--color-warning-strong);
+}
+/*
+  Peringatan buku yang belum dibuat: kuning seperti buku tutup, karena ini
+  langkah yang harus dikerjakan HRD, bukan kegagalan yang sudah terjadi.
+*/
+.manual-period-actions {
+  display: flex;
+  gap: 0.1875rem;
+  margin-inline-start: auto;
+}
+.manual-period-actions .manual-btn,
+.manual-search .manual-btn {
+  min-height: 1.75rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.6875rem;
+}
+.manual-search .manual-btn {
+  min-height: 2rem;
+}
+.manual-dialog-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.manual-period-warning {
+  margin: 0;
+  border-block: 1px solid var(--color-warning-border);
+  padding: 0.5rem 1rem;
+  background: var(--color-warning-soft);
+  color: var(--color-warning-strong);
+  font-size: 0.8125rem;
+}
+.manual-readonly {
+  border: 1px solid var(--color-warning-border);
+  border-inline: 0;
+  padding: 0.375rem 0.5rem;
+  background: var(--color-warning-soft);
+  color: var(--color-warning-strong);
+}
+.manual-workspace {
+  border: 1px solid var(--color-border);
+  border-inline: 0;
+  border-radius: 0;
+  background: var(--color-surface);
+  overflow: hidden;
+}
+/* Title and Simpan share the first line; the counts get the full width of
+   the second, so they never wrap into a third beside the button. */
+.manual-workspace-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 0.5rem;
+  padding: 0.375rem 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.manual-workspace-heading > h2 {
+  grid-area: 1 / 1;
+}
+.manual-workspace-heading > button {
+  grid-area: 1 / 2;
+}
+.manual-workspace-heading > p {
+  grid-area: 2 / 1 / 3 / 3;
+}
+.manual-page h2,
+.manual-page h3 {
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+.manual-workspace-heading p,
+.manual-hint,
+.manual-pagination {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+.manual-toolbar {
+  display: grid;
+  gap: 0.1875rem;
+  padding: 0.125rem 0.5rem;
+}
+.manual-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.1875rem;
+  flex-wrap: wrap;
+}
+.manual-toolbar .manual-btn {
+  padding: 0.125rem 0.3125rem;
+  min-height: 1.75rem;
+  font-size: 0.6875rem;
+  line-height: 1.1;
+}
+.manual-page .manual-checkbox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.25rem;
+  margin-right: 0.125rem;
+}
+.manual-checkbox input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--color-brand);
+}
+.manual-hint {
+  padding: 0 0.5rem 0.25rem;
+  line-height: 1.4;
+}
+.manual-guide {
+  padding: 0.125rem 0.5rem 0;
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+.manual-guide summary {
+  width: max-content;
+  cursor: pointer;
+  color: var(--color-foreground);
+  font-weight: 600;
+}
+.manual-guide p {
+  max-width: 52rem;
+  padding-top: 0.25rem;
+  line-height: 1.4;
+}
+.manual-grid-viewport {
+  width: 100%;
+  overflow-x: auto;
+  border-block: 1px solid var(--color-border);
+}
+.manual-grid-shell {
+  position: relative;
+}
+.manual-assignee-popover {
+  position: absolute;
+  z-index: 20;
+  width: min(22rem, calc(100% - 0.5rem));
+  max-height: calc(100% - 0.5rem);
+  overflow: auto;
+  padding: 0.375rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  background: var(--color-surface);
+  box-shadow: 0 0.5rem 1.5rem rgb(15 23 42 / 18%);
+}
+.manual-assignee-popover .manual-picker {
+  max-width: none;
+  margin: 0;
+}
+.manual-assignee-popover .manual-picker-results {
+  margin-bottom: 0;
+}
+/*
+ * The date affordance for Shift Start/End. Univer renders the sheet on a
+ * canvas, so the icon is an HTML button parked over the cell's right edge —
+ * close enough to read as part of the cell, narrow enough to leave the value
+ * visible.
+ */
+.manual-date-cell {
+  position: absolute;
+  z-index: 21;
+  display: flex;
+  align-items: center;
+  transform: translateX(-100%);
+}
+.manual-date-trigger {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-right: 0.125rem;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  cursor: pointer;
+}
+.manual-date-trigger:hover,
+.manual-date-trigger[aria-expanded="true"] {
+  background: var(--color-surface-muted);
+  color: var(--color-foreground);
+}
+.manual-date-trigger svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+}
+.manual-date-popover {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  z-index: 22;
+  display: grid;
+  gap: 0.25rem;
+  min-width: 14rem;
+  padding: 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  background: var(--color-surface);
+  box-shadow: 0 0.5rem 1.5rem rgb(15 23 42 / 18%);
+}
+.manual-date-popover label {
+  font-size: 0.75rem;
+  color: var(--color-muted);
+}
+.manual-date-popover input {
+  padding: 0.25rem 0.375rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  background: var(--color-surface);
+  color: var(--color-foreground);
+  font: inherit;
+}
+.manual-grid {
+  width: 100%;
+  height: var(--manual-pane-height, max(36rem, calc(100vh - 16rem)));
+  min-width: 800px;
+}
+.manual-grid-engine {
+  width: 100%;
+  height: 100%;
+}
+.manual-pagination {
+  padding: 0.25rem 0.5rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.25rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.manual-pagination > div {
+  display: flex;
+  gap: 0.25rem;
+}
+.manual-pagination .manual-page-size {
+  width: auto;
+  font-size: 0.75rem;
+}
+.manual-notice,
+.manual-status {
+  padding: 0.75rem 1rem;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  background: var(--color-surface-muted);
+}
+.manual-template-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-inline-start: 0.375rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+.manual-template-links a {
+  color: var(--color-brand);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.manual-template-links a:hover {
+  color: var(--color-brand-strong);
+}
+
+.manual-status:empty {
+  display: none;
+}
+/*
+  A failed import used to look identical to "12 baris ditempel ke draft": same
+  grey strip, same weight. The one message that needs acting on now carries the
+  weight to match.
+*/
+.manual-status-failed {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  background: color-mix(in srgb, var(--color-danger) 8%, var(--color-surface));
+  color: color-mix(in srgb, var(--color-danger) 70%, black);
+  font-weight: 600;
+  border-block: 1px solid
+    color-mix(in srgb, var(--color-danger) 40%, var(--color-surface));
+}
+.manual-status-mark {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background: var(--color-danger);
+  color: #fff;
+  font-size: 0.8125rem;
+  line-height: 1;
+}
+.manual-error,
+.manual-errors {
+  padding: 0.75rem 1rem 1rem;
+  border-block: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  font-size: 0.8125rem;
+}
+.manual-error-list {
+  overflow: auto;
+  max-height: 18rem;
+}
+.manual-error-list table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 500px;
+  margin-top: 0.75rem;
+  text-align: left;
+}
+.manual-error-list th,
+.manual-error-list td {
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+/*
+  The grid is a fixed-width canvas that leaves a wide gutter on a desktop
+  window. The problem list lives in it, beside the rows it describes, instead
+  of below a grid of 15,000 rows that nobody scrolls past.
+*/
+.manual-split {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  /*
+    One height for both columns, declared once so they cannot drift apart.
+    `align-items: stretch` is NOT enough on its own: it sizes the flex line to
+    the TALLEST item, so a 50-name directory stretched the grid to match it
+    instead of being clipped by it. Both panes take this height explicitly.
+  */
+  /*
+    Both columns now start right under the app header — the book picker,
+    filters and toolbar moved into the right-hand column — so the height left
+    for them is the window minus the header and the page's own padding, not
+    minus a stack of toolbars.
+  */
+  --manual-pane-height: max(32rem, calc(100vh - 4.5rem));
+  --manual-pane-height: max(32rem, calc(100dvh - 4.5rem));
+}
+/*
+  Left column: the grid takes whatever height the pagination and the active
+  row's message leave, so the column always ends exactly where the right-hand
+  one does.
+*/
+.manual-split-grid {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--manual-pane-height);
+}
+.manual-split-grid > * {
+  flex: none;
+}
+.manual-split-grid > .manual-grid-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* Shell -> viewport -> grid: every link has to pass the height down. */
+.manual-split-grid .manual-grid-viewport,
+.manual-split-grid .manual-grid {
+  height: 100%;
+}
+/*
+  One gutter shared by the problem list and the row editor, so the two never
+  compete for the same strip of screen.
+*/
+.manual-split-side {
+  /* `min-width: 0` matters: without it a long EID refuses to wrap and the
+     column pushes its own buttons past the right edge of the page. */
+  flex: 0 0 clamp(21rem, 24vw, 26rem);
+  min-width: 0;
+  border-inline-start: 1px solid var(--color-border);
+  /*
+    A column, so the tab strip stays put and only the ACTIVE panel scrolls.
+    One scroller, never two.
+
+    Two earlier attempts at bounding it both let the page grow instead, and
+    neither is a safe thing to go back to:
+
+    - `max-height: 100vh` — a max-height is not a height. The box starts below
+      the toolbars, so 100vh already reaches past the bottom of the window.
+    - `align-items: stretch` alone — stretch sizes the flex line to the
+      TALLEST item, so a 50-name directory pulled the GRID down to match it
+      rather than being clipped by it.
+
+    Hence a real height, shared with the grid through one custom property, and
+    `align-self: flex-start` so stretch cannot override it.
+  */
+  display: flex;
+  flex-direction: column;
+  height: var(--manual-pane-height);
+  align-self: flex-start;
+  overflow: hidden;
+}
+.manual-split-side > .manual-errors,
+.manual-split-side > .manual-directory,
+.manual-split-side > .manual-editor {
+  border-inline: 0;
+  border-block-start: 0;
+  /* `flex: 1 1 auto` claims the height left over by the tab strip, and
+     `min-height: 0` is what actually lets a flex child shrink below its
+     content and scroll. Without the pair, the panel keeps its content height
+     and spills out of the gutter. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+/*
+  Top of the right-hand column: book picker, filters, save, status and the
+  toolbar. It keeps its content height and never scrolls; the tab panel under
+  it gives up height instead, so Simpan and the save feedback stay on screen
+  whatever the panel holds.
+*/
+.manual-side-controls {
+  flex: none;
+  display: grid;
+  gap: 0.25rem;
+  padding-block-end: 0.25rem;
+  border-block-end: 1px solid var(--color-border);
+}
+.manual-side-controls > .manual-page-controls {
+  padding: 0.375rem 0.5rem 0;
+}
+/* In the column the book and the search each take the full width. */
+.manual-side-controls .manual-filters {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.375rem;
+}
+.manual-side-controls .manual-book,
+.manual-side-controls .manual-search {
+  flex: none;
+}
+.manual-page-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.25rem;
+}
+/* Only the screen-reader h1 is left here while a workspace is shown. */
+.manual-control-bar:not(:has(.manual-page-controls)) {
+  margin: 0;
+  padding: 0;
+}
+/* Defensive: nothing here sets `display`, but a panel that loses `hidden` to a
+   later rule would render on top of the one the tab selected. */
+.manual-split-side [hidden] {
+  display: none !important;
+}
+.manual-split-tabs {
+  display: flex;
+  flex: none;
+  gap: 0.25rem;
+  padding: 0.375rem 0.5rem 0;
+  border-block-end: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+}
+.manual-split-tabs button {
+  padding: 0.375rem 0.625rem;
+  border: 0;
+  border-block-end: 2px solid transparent;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8125rem;
+  color: var(--color-muted);
+}
+.manual-split-tabs button[aria-selected="true"] {
+  border-block-end-color: var(--color-brand);
+  color: var(--color-brand-strong);
+  font-weight: 600;
+}
+/* Below this the gutter is gone, so both go back under the grid. */
+@media (max-width: 1200px) {
+  /*
+    One column. The right-hand column dissolves (`display: contents`) so its
+    pieces can be reordered around the grid without duplicating markup: the
+    controls go back ABOVE the grid, where a narrow screen reads them first,
+    and the tab panels stay below it.
+  */
+  .manual-split {
+    display: flex;
+    flex-direction: column;
+    --manual-pane-height: max(32rem, calc(100vh - 16rem));
+    --manual-pane-height: max(32rem, calc(100dvh - 16rem));
+  }
+  .manual-split-side {
+    display: contents;
+  }
+  .manual-side-controls {
+    order: -1;
+  }
+  /* A full-width strip here: the groups sit side by side, spaced apart. */
+  .manual-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 0.75rem;
+  }
+  .manual-split-tabs {
+    border-block-start: 1px solid var(--color-border);
+  }
+  .manual-split-side > .manual-errors,
+  .manual-split-side > .manual-directory,
+  .manual-split-side > .manual-editor {
+    /* `max-height` works here where it failed in the wide layout: this is the
+       element's OWN overflow against its own content, not a flex child being
+       asked to shrink inside a parent that had no height to shrink against.
+       Without it, 50 names add 2.800px to the page. */
+    max-height: 70vh;
+    max-height: 70dvh;
+    overflow: auto;
+  }
+  /* With the page as the scroller there is nothing to stick to but the
+     viewport, which would float the search box over the grid. */
+  .manual-directory-head {
+    position: static;
+    margin: 0;
+    padding: 0 0 0.5rem;
+  }
+}
+
+/*
+  The employee directory shares the gutter with the error list, so it shares
+  its measurements too — two panels with different padding in one 24rem column
+  read as a layout bug rather than as two sections.
+*/
+.manual-directory {
+  /* No top padding of its own — `.manual-directory-head` carries it, so the
+     sticky header can sit flush against the scrollport with nothing able to
+     scroll past above it. */
+  padding: 0 1rem 1rem;
+  border-block: 1px solid var(--color-border);
+  font-size: 0.8125rem;
+}
+/* Stays while the names scroll under it — see the note in the component. The
+   negative inline margins let its background reach the panel's own padding,
+   so a name never slides out visibly beside the search box. */
+.manual-directory-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  /* Inline margins only. A NEGATIVE TOP MARGIN HERE IS A BUG: sticky pins the
+     MARGIN box at `top`, so `margin-top: -1rem` pushed the visible border box
+     1rem down and names scrolled through the gap above it. */
+  margin-inline: -1rem;
+  padding: 1rem 1rem 0.5rem;
+  background: var(--color-surface);
+}
+.manual-directory-head label {
+  display: block;
+  margin-block-end: 0.25rem;
+  font-weight: 600;
+}
+.manual-directory-head input {
+  width: 100%;
+  min-width: 0;
+}
+.manual-directory-head .manual-hint {
+  padding-block-end: 0;
+}
+.manual-directory-status:empty {
+  display: none;
+}
+.manual-directory-status {
+  margin: 0.5rem 0 0;
+  color: var(--color-success-strong);
+  font-weight: 600;
+}
+.manual-directory-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+.manual-directory-list button {
+  display: grid;
+  gap: 0.125rem;
+  width: 100%;
+  padding: 0.375rem 0.5rem;
+  text-align: start;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.manual-directory-list button:hover,
+.manual-directory-list button:focus-visible {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+}
+.manual-directory-list strong {
+  /* Long names wrap instead of widening the gutter past the page edge. */
+  overflow-wrap: anywhere;
+}
+.manual-directory-list span {
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.manual-error-groups {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.manual-error-groups > li {
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+}
+/* The cause, said once for the whole group instead of on every value. */
+.manual-error-cause {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0;
+  font-weight: 600;
+}
+.manual-error-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+/*
+  Sits directly above the grid so the cause is readable without leaving the
+  cell. Sticky because a large import scrolls far from the header.
+*/
+.manual-row-problem {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem 0.75rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.8125rem;
+  border-block: 1px solid #f0b4b4;
+  background: #fdecec;
+  color: #7a1f1f;
+}
+.manual-row-problem strong {
+  white-space: nowrap;
+}
+
+.manual-fix-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.manual-fix-list > li + li {
+  border-block-start: 1px solid var(--color-border);
+  padding-block-start: 0.5rem;
+}
+.manual-fix-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.5rem;
+}
+.manual-fix-head code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.manual-fix-form {
+  display: flex;
+  /* Top-aligned: the combobox grows downwards when its list opens, and the
+     Terapkan button must not ride down with it. */
+  align-items: flex-start;
+  gap: 0.375rem;
+  margin-block-start: 0.25rem;
+}
+.manual-fix-form > input,
+.manual-fix-combo {
+  flex: 1 1 4rem;
+  min-width: 0;
+}
+.manual-fix-combo input {
+  width: 100%;
+  min-width: 0;
+}
+/* In flow, not floating: the panel around it has `overflow: auto`, which would
+   clip an absolutely positioned menu instead of letting it hang over the grid. */
+.manual-fix-options {
+  margin-block-start: 0.25rem;
+  padding: 0.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  background: var(--color-surface);
+}
+.manual-fix-options [role="listbox"] {
+  max-height: 12rem;
+  overflow-y: auto;
+}
+.manual-fix-options [role="option"] {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.375rem 0.5rem;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  text-align: start;
+  font: inherit;
+  cursor: pointer;
+}
+.manual-fix-options [role="option"]:hover,
+.manual-fix-options [aria-selected="true"] {
+  background: var(--color-surface-muted);
+}
+.manual-fix-options [role="option"] strong {
+  overflow-wrap: anywhere;
+}
+.manual-fix-options [role="option"] span {
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.manual-fix-options p {
+  margin: 0.25rem 0 0;
+  color: var(--color-muted);
+}
+/* Confirms WHO the typed PIN belongs to before Terapkan rewrites 164 cells. */
+.manual-fix-picked {
+  margin: 0.25rem 0 0;
+  color: var(--color-success-strong);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+/* A jump target reads as a link, not as a third button competing for the eye. */
+.manual-link {
+  flex: 0 0 auto;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--color-accent, #0b6b4f);
+  text-decoration: underline;
+  cursor: pointer;
+}
+/* Destructive, so it reads as destructive — but still a link, not a button:
+   deleting is an alternative to fixing, not the action the panel pushes. */
+.manual-link.manual-danger {
+  color: var(--color-danger);
+}
+.manual-link:disabled {
+  color: var(--color-disabled);
+  cursor: default;
+}
+/* One line of cause-wide actions, wrapping rather than pushing past the
+   gutter when the row count makes the label long. */
+.manual-group-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  margin: 0.5rem 0 0;
+}
+.manual-editor,
+.manual-paste {
+  border-top: 1px solid var(--color-border);
+  padding: 1rem;
+}
+.manual-editor > .manual-toolbar,
+.manual-directory .manual-toolbar {
+  padding: 0 0 0.5rem;
+}
+/* Title left, Tutup hard right — the panel already owns the full gutter. */
+.manual-directory .manual-toolbar {
+  justify-content: space-between;
+}
+.manual-editor .manual-hint,
+.manual-directory .manual-hint {
+  padding-left: 0;
+}
+.manual-editor-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.manual-toolbar input[type="number"] {
+  width: 5rem;
+}
+.manual-picker {
+  position: relative;
+  max-width: 30rem;
+  margin-bottom: 0.75rem;
+}
+.manual-picker-results {
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  padding: 0.5rem;
+  background: var(--color-surface);
+  margin-top: 0.375rem;
+}
+.manual-picker-results [role="listbox"] {
+  max-height: 16rem;
+  overflow-y: auto;
+}
+.manual-picker-results [role="option"] {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem;
+  width: 100%;
+  text-align: left;
+  font-size: 0.8125rem;
+  border-radius: 0.25rem;
+}
+.manual-picker-results [aria-selected="true"] {
+  background: var(--color-surface-muted);
+}
+.manual-picker-results span {
+  color: var(--color-muted);
+}
+.manual-picker-results p,
+.manual-paste p {
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  padding-block: 0.5rem;
+}
+/* Tautan template harus terbaca sebagai tautan; tanpa ini ia menyatu dengan
+   paragraf petunjuk dan tidak pernah diklik. */
+.manual-paste a {
+  color: var(--color-brand);
+  font-weight: 600;
+  text-decoration: underline;
+}
+.manual-paste a:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.manual-dialog {
+  width: min(32rem, calc(100% - 2rem));
+  margin: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  padding: 0;
+  background: var(--color-surface);
+  color: var(--color-foreground);
+}
+.manual-dialog::backdrop {
+  background: rgb(15 23 42 / 45%);
+}
+.manual-dialog form {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+.manual-dialog p,
+.manual-dialog small {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+.manual-dialog [role="alert"] {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+.manual-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+.manual-paste textarea {
+  font-family: monospace;
+  margin-bottom: 0.75rem;
+}
+@media (max-width: 600px) {
+  #main-content:has(> .manual-page) {
+    padding-inline: 0;
+  }
+  .manual-control-bar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .manual-page-title {
+    padding-bottom: 0;
+  }
+  .manual-filters > label {
+    width: 100%;
+    flex-basis: 100%;
+  }
+  .manual-grid {
+    height: 24rem;
+  }
+  .manual-workspace-heading {
+    align-items: start;
+  }
+}
+
+@media (pointer: coarse) {
+  .manual-btn,
+  .manual-page input:not([type="checkbox"]),
+  .manual-page select,
+  .manual-page textarea {
+    min-height: 2.5rem;
+  }
+}
+
+/*
+  Modal progres impor. Memakai kotak .manual-dialog yang sama dengan dialog
+  lain di layar ini; yang ditambahkan hanya daftar tahap dan batang progres.
+*/
+.manual-import-progress-body {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+.manual-import-progress-body h2 {
+  overflow-wrap: anywhere;
+  font-size: 0.9375rem;
+}
+.manual-import-steps {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8125rem;
+}
+.manual-import-steps li {
+  padding-left: 1.25rem;
+  position: relative;
+  color: var(--color-muted);
+}
+.manual-import-steps li::before {
+  position: absolute;
+  left: 0;
+  content: "○";
+}
+.manual-import-steps li[data-state="done"]::before {
+  content: "✓";
+  color: var(--color-success);
+}
+.manual-import-steps li[data-state="active"] {
+  color: var(--color-foreground);
+  font-weight: 600;
+}
+.manual-import-steps li[data-state="active"]::before {
+  content: "●";
+  color: var(--color-brand);
+}
+.manual-import-bar {
+  width: 100%;
+  height: 0.5rem;
+  accent-color: var(--color-brand);
+}
+/*
+  Tanpa nilai, Chrome menggambar <progress> sebagai batang abu-abu yang diam —
+  persis tampilan aplikasi yang macet. Tahap tanpa persentase diberi gerak
+  supaya terbaca "sedang bekerja".
+*/
+.manual-import-bar:indeterminate {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+        90deg,
+        transparent 0%,
+        var(--color-brand) 50%,
+        transparent 100%
+      )
+      0 0 / 40% 100% no-repeat,
+    var(--color-surface-muted);
+  animation: manual-import-sweep 1.2s ease-in-out infinite;
+}
+.manual-import-bar:indeterminate::-webkit-progress-bar {
+  background: transparent;
+}
+@keyframes manual-import-sweep {
+  from {
+    background-position:
+      -40% 0,
+      0 0;
+  }
+  to {
+    background-position:
+      140% 0,
+      0 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .manual-import-bar:indeterminate {
+    animation: none;
+    background: var(--color-brand);
+    opacity: 0.35;
+  }
+}
+/* Kotaknya sendiri tidak interaktif; fokus awal modal jatuh di sana. */
+.manual-import-progress:focus-visible {
+  outline: none;
+}

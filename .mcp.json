@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"]
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest", "--isolated"]
+    },
+    "univer-docs": {
+      "command": "uvx",
+      "args": [
+        "--with",
+        "mcp<2",
+        "mcpdoc==0.0.10",
+        "--urls",
+        "UniverSheets:https://docs.univer.ai/llms.txt",
+        "--follow-redirects",
+        "--timeout",
+        "20"
+      ]
+    }
+  }
+}

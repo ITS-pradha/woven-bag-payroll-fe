@@ -1,0 +1,14 @@
+[mcp_servers.univer-docs]
+command = "uvx"
+args = [
+  "--with",
+  "mcp<2",
+  "mcpdoc==0.0.10",
+  "--urls",
+  "UniverSheets:https://docs.univer.ai/llms.txt",
+  "--follow-redirects",
+  "--timeout",
+  "20",
+]
+startup_timeout_sec = 30
+tool_timeout_sec = 60

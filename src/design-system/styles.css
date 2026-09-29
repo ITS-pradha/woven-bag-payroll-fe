@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+
+  --color-app: #f3f5f4;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f7f9f8;
+  --color-foreground: #17201d;
+  --color-muted: #5d6a65;
+  --color-disabled: #8b9692;
+  --color-border: #d9dfdc;
+  --color-border-strong: #aab5b0;
+  --color-focus: #1677c8;
+
+  --color-brand: #17634f;
+  --color-brand-strong: #124d3e;
+  --color-brand-disabled: #75a596;
+
+  --color-success: #238464;
+  --color-success-soft: #edf8f3;
+  --color-success-border: #acd8c8;
+  --color-success-strong: #155c45;
+
+  --color-info-soft: #edf5fb;
+  --color-info-border: #b7d4e9;
+  --color-info-strong: #205d87;
+  --color-warning-soft: #fff8e6;
+  --color-warning-border: #e8cf85;
+  --color-warning-strong: #70500c;
+  --color-danger: #b42318;
+
+  --color-grid-header: #dce8e3;
+  --color-grid-header-foreground: #263a33;
+  --color-grid-border: #c4d0cb;
+
+  --shadow-panel: 0 1px 2px rgb(23 32 29 / 0.06);
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    min-width: 320px;
+    background: var(--color-app);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    min-width: 320px;
+    min-height: 100vh;
+    margin: 0;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  ::selection {
+    background: #c6e5da;
+    color: var(--color-foreground);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/*
+  Halaman kerja (Detail, Summary, Konfigurasi Harga) memakai lebar layar penuh
+  seperti Manual Data: tanpa batas max-width dan tanpa gutter dari <main>.
+  Bar header/tab tetap menempel ke tepi; isi di bawahnya diberi gutter tipis.
+*/
+#main-content:has(> .workspace-page) {
+  max-width: none;
+  padding: 0.25rem 0 1rem;
+}
+
+.workspace-page {
+  min-width: 0;
+  padding-inline: 0.25rem;
+}
+
+.workspace-page > :is(header, nav) {
+  margin-inline: -0.25rem;
+}
