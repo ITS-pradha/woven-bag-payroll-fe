@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  displayDecimal,
+  entryCells,
+  isChanged,
   isAmbiguousDecimal,
   MAX_ROWS,
   serverFieldColumn,
@@ -508,6 +511,48 @@ describe("batas nilai dan desimal ambigu", () => {
       new Map(),
     );
     expect(result.errors).toEqual([]);
+  });
+
+  it("menampilkan angka server seperti spreadsheet lama, tanpa nol di ujung", () => {
+    expect(displayDecimal("75.00")).toBe("75");
+    expect(displayDecimal("9.700")).toBe("9.7");
+    expect(displayDecimal("11.200")).toBe("11.2");
+    expect(displayDecimal("642.000")).toBe("642");
+    expect(displayDecimal("0.000")).toBe("0");
+    expect(displayDecimal("1.902")).toBe("1.902");
+    expect(displayDecimal("1902")).toBe("1902");
+    expect(displayDecimal("")).toBe("");
+  });
+
+  it("baris server yang tampil dirapikan tidak dianggap berubah dan tidak ditolak", () => {
+    const original = {
+      id: "e1",
+      shiftStart: "2026-09-04T07:00:00+07:00",
+      shiftEnd: "2026-09-04T15:00:00+07:00",
+      stationNo: 51,
+      pin: "8954",
+      widthCm: "75.00",
+      weftDensity: "9.700",
+      resultMeter: "850.000",
+      sourceType: "MANUAL" as const,
+      status: "ACTIVE" as const,
+      rowVersion: 3,
+    };
+    const shown = entryCells(original);
+    expect(shown.slice(4)).toEqual(["75", "9.7", "850"]);
+
+    const result = validateRows(
+      [{ key: "r1", cells: shown, original }],
+      new Map(),
+    );
+    expect(result.errors).toEqual([]);
+    expect(isChanged(result.rows[0]!, original)).toBe(false);
+
+    const edited = validateRows(
+      [{ key: "r1", cells: [...shown.slice(0, 6), "851"], original }],
+      new Map(),
+    );
+    expect(isChanged(edited.rows[0]!, original)).toBe(true);
   });
 
   it("batas kolom mengikuti DDL", () => {

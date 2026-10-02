@@ -203,6 +203,16 @@ function significantDecimals(value: string) {
   return (value.split(".")[1] ?? "").replace(/0+$/, "").length;
 }
 
+/**
+ * A server decimal as the admin's spreadsheet showed it: "75.00" → "75",
+ * "9.700" → "9.7", "642.000" → "642". The DDL scales (2/3/3) pad every value,
+ * and the padding reads as false precision next to the legacy sheet.
+ */
+export function displayDecimal(value: string) {
+  if (!value.includes(".")) return value;
+  return value.replace(/0+$/, "").replace(/\.$/, "");
+}
+
 /** "1.9020" → "1.902", "56.00" untouched: only zeros past the scale go. */
 function trimToScale(value: string, scale: number) {
   const [whole, fraction] = value.split(".");
@@ -415,8 +425,12 @@ export function validateRows(
       : [];
     for (const col of [4, 5, 6]) {
       const value = values[col] ?? "";
-      // A cell still holding what the server returned is never second-guessed.
-      const fromServer = originalDecimals[col - 4] === value;
+      // A cell still holding what the server returned is never second-guessed,
+      // whether it shows the padded server text or the trimmed display form.
+      const original = originalDecimals[col - 4];
+      const fromServer =
+        original !== undefined &&
+        (original === value || displayDecimal(original) === value);
       if (!fromServer && isAmbiguousDecimal(value, col)) {
         const grouped = value.replace(/[.,]/, "");
         fail(
@@ -482,9 +496,9 @@ export function entryCells(entry: Baseline, name?: string): string[] {
     toJakartaInput(entry.shiftEnd),
     String(entry.stationNo),
     name ?? entry.pin,
-    entry.widthCm,
-    entry.weftDensity,
-    entry.resultMeter,
+    displayDecimal(entry.widthCm),
+    displayDecimal(entry.weftDensity),
+    displayDecimal(entry.resultMeter),
   ];
 }
 
@@ -495,9 +509,10 @@ export function isChanged(row: BatchInput, original?: Baseline) {
     Date.parse(row.shiftEnd) !== Date.parse(original.shiftEnd) ||
     row.stationNo !== original.stationNo ||
     row.pin !== original.pin ||
-    row.widthCm !== original.widthCm ||
-    row.weftDensity !== original.weftDensity ||
-    row.resultMeter !== original.resultMeter
+    // By value: the grid shows "75" for the server's "75.00".
+    displayDecimal(row.widthCm) !== displayDecimal(original.widthCm) ||
+    displayDecimal(row.weftDensity) !== displayDecimal(original.weftDensity) ||
+    displayDecimal(row.resultMeter) !== displayDecimal(original.resultMeter)
   );
 }
 
