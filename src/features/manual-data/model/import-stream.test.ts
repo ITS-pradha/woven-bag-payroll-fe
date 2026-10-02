@@ -240,6 +240,85 @@ describe("importProductionStream", () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
+  it("menghitung baris ditolak, bukan jumlah pesan", async () => {
+    const bad = "2026-09-04 07:00,2026-09-04 15:00,51,8954,,,";
+    const summary = await importProductionStream({
+      chunks: chunked([HEADER, bad, line(52)].join("\n")),
+      send: accepting().send,
+      newKey,
+    });
+    expect(summary.rejections).toHaveLength(3);
+    expect(summary.rejected).toBe(1);
+    expect(summary.inserted).toBe(1);
+  });
+
+  it("baris judul di bawah judul laporan, nomor baris file tetap", async () => {
+    const api = accepting();
+    const summary = await importProductionStream({
+      chunks: chunked(
+        [
+          "Laporan Produksi",
+          "",
+          HEADER,
+          line(51),
+          "",
+          "x,y,52,8954,56,10,1",
+        ].join("\n"),
+      ),
+      send: api.send,
+      newKey,
+    });
+    expect(summary.headerDetected).toBe(true);
+    expect(summary.skippedBeforeHeader).toBe(1);
+    expect(summary.inserted).toBe(1);
+    expect(new Set(summary.rejections.map((item) => item.row))).toEqual(
+      new Set([6]),
+    );
+  });
+
+  it("kolom lebih tanpa header ditolak per baris, impor jalan terus", async () => {
+    const api = accepting();
+    const summary = await importProductionStream({
+      chunks: chunked([`${line(51)},asing`, `${line(52)},,`].join("\n")),
+      send: api.send,
+      newKey,
+    });
+    expect(summary.rejected).toBe(1);
+    expect(summary.rejections[0]).toMatchObject({ row: 1, field: "Baris" });
+    expect(api.calls.flatMap((call) => call.rows)).toHaveLength(1);
+  });
+
+  it("importKey: kunci batch turunan, sama persis saat diulang", async () => {
+    const text = [
+      HEADER,
+      ...Array.from({ length: 5 }, (_, i) => line(i + 1)),
+    ].join("\n");
+    const run = async () => {
+      const api = accepting();
+      await importProductionStream({
+        chunks: chunked(text),
+        send: api.send,
+        importKey: "imp-1",
+        batchSize: 2,
+      });
+      return api.calls.map((call) => call.key);
+    };
+    const first = await run();
+    expect(first).toEqual(["imp-1-0", "imp-1-1", "imp-1-2"]);
+    expect(await run()).toEqual(first);
+  });
+
+  it("baris gagal tidak membuat baris benar dengan shift sama jadi duplikat", async () => {
+    const failing = "2026-09-04 07:00,2026-09-04 15:00,51,,56,10,982";
+    const summary = await importProductionStream({
+      chunks: chunked([HEADER, failing, line(51)].join("\n")),
+      send: accepting().send,
+      newKey,
+    });
+    expect(summary.rejected).toBe(1);
+    expect(summary.inserted).toBe(1);
+  });
+
   it("menolak file kosong", async () => {
     await expect(
       importProductionStream({

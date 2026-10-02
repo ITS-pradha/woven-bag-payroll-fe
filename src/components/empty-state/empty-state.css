@@ -1,0 +1,162 @@
+/*
+  Shared empty state. The card sits over a faint, static sketch of the table
+  that will appear here — header band and ruled cells, fading downwards — so
+  an empty screen reads as "this is where the data goes".
+*/
+.empty-state {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 22rem;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+.empty-state-fill {
+  min-height: max(22rem, calc(100vh - 11rem));
+}
+.empty-state-sheet {
+  position: absolute;
+  inset: 0;
+  opacity: 0.6;
+  mask-image: linear-gradient(to bottom, #000, transparent 85%);
+}
+/* Ghost primitives the features compose their backdrop from. */
+.ghost-table {
+  display: grid;
+}
+.ghost-row {
+  display: grid;
+  height: 2rem;
+  border-block-end: 1px solid var(--color-border);
+}
+.ghost-head {
+  background: var(--color-grid-header);
+}
+.ghost-cell,
+.ghost-gutter {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding-inline: 0.5rem;
+  border-inline-end: 1px solid var(--color-border);
+}
+.ghost-cell:last-child {
+  border-inline-end: 0;
+}
+.ghost-gutter,
+.ghost-label {
+  color: var(--color-grid-header-foreground);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  opacity: 0.55;
+}
+.ghost-gutter::before,
+.ghost-label::before {
+  content: attr(data-label);
+}
+/* One line, clipped by its cell: a sketch never grows a row. */
+.ghost-label {
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ghost-gutter {
+  justify-content: center;
+  background: var(--color-grid-header);
+}
+.ghost-bar {
+  display: block;
+  flex: none;
+  height: 0.4375rem;
+  max-width: 100%;
+  border-radius: 0.25rem;
+  background: var(--color-border);
+}
+/* A box drawn like a panel or card on the real screen. */
+.ghost-box {
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  background: var(--color-surface);
+}
+.ghost-chip {
+  display: grid;
+  place-items: center;
+  height: 1.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  color: var(--color-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+
+.empty-state-card {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 0.5rem;
+  width: min(26rem, calc(100% - 2rem));
+  padding: 1.5rem 1.5rem 1.375rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  background: var(--color-surface);
+  box-shadow: 0 12px 32px -18px rgb(15 23 42 / 0.3);
+  text-align: center;
+}
+.empty-state-icon {
+  width: 2rem;
+  height: 2rem;
+  margin-bottom: 0.25rem;
+  fill: none;
+  stroke: var(--color-brand);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.empty-state-card h2 {
+  color: var(--color-foreground);
+  font-size: 1rem;
+  font-weight: 650;
+}
+.empty-state-card p {
+  max-width: 36ch;
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+.empty-state-action {
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+}
+
+/* The one primary step. A class, not a component: it is a <button> in one
+   menu and a router <Link> in another. */
+.empty-state-primary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding-inline: 0.875rem;
+  border: 1px solid var(--color-brand);
+  border-radius: 0.25rem;
+  background: var(--color-brand);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+.empty-state-primary:hover {
+  border-color: var(--color-brand-strong);
+  background: var(--color-brand-strong);
+}
+.empty-state-primary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+/* For viewers without the permission: says who can take the step. */
+.empty-state-note {
+  color: var(--color-foreground);
+  font-weight: 600;
+}

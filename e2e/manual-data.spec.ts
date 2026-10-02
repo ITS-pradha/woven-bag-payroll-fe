@@ -47,8 +47,27 @@ function monthBook(offset: number, status: Period["status"]): Period {
     periodEnd: end.toISOString().slice(0, 10),
     departmentCode: "KARUNG",
     status,
+    rowVersion: 1,
     createdAt: `${periodStart}T08:00:00+07:00`,
     closedAt: status === "CLOSED" ? `${periodStart}T08:00:00+07:00` : null,
+  };
+}
+/** Siklus cut-off 24 s/d 23 (WIB) yang mencakup hari ini, dinamai bulan akhirnya. */
+function cycleBook(): Period {
+  const now = new Date(Date.now() + 7 * 3_600_000);
+  const shift = now.getUTCDate() >= 24 ? 0 : -1;
+  const start = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + shift, 24),
+  );
+  const end = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + shift + 1, 23),
+  );
+  const periodEnd = end.toISOString().slice(0, 10);
+  return {
+    ...monthBook(0, "OPEN"),
+    code: `KARUNG-${periodEnd.slice(0, 7)}`,
+    periodStart: start.toISOString().slice(0, 10),
+    periodEnd,
   };
 }
 /** Bulan lalu tutup, bulan ini dan bulan depan buka — tidak ada peringatan. */
@@ -186,9 +205,20 @@ test("assignee dapat dicari dan dipilih langsung dari sel grid", async ({
   const canvas = page.locator(SHEET_CANVAS);
   await expect(canvas).toBeVisible({ timeout: 45_000 });
   // Assignee is the fifth visible sheet column after the row-number gutter.
+  // A click only selects the cell: the list waits for the button inside it,
+  // the same as the calendar in Shift Start/End.
   await canvas.click({ position: { x: 650, y: 75 } });
-
   const inlinePicker = page.locator(".manual-assignee-popover");
+  await expect(inlinePicker).toHaveCount(0);
+
+  const trigger = page.getByRole("button", { name: "Pilih assignee baris 1" });
+  await trigger.click();
+  await expect(inlinePicker).toBeVisible();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  // The button toggles, so a second click puts the list away again.
+  await trigger.click();
+  await expect(inlinePicker).toHaveCount(0);
+  await trigger.click();
   await expect(inlinePicker).toBeVisible();
   await inlinePicker
     .getByRole("combobox", { name: "Cari assignee" })
@@ -254,14 +284,18 @@ test("grid, checkbox, assignee search, paste dan batch save mengikuti kontrak", 
   ).toBeChecked();
   await page.getByLabel("Pilih baris aktif", { exact: true }).uncheck();
   await page.getByLabel("Pilih baris aktif", { exact: true }).check();
+  // Salin tinggal di menu "Lainnya" bersama aksi baris yang jarang dipakai.
+  await page.getByRole("button", { name: "Lainnya" }).click();
   await expect(
-    page.getByRole("button", { name: "Salin baris (1)" }),
+    page.getByRole("menuitem", { name: "Salin baris (1)" }),
   ).toBeEnabled();
+  await page.keyboard.press("Escape");
   await page.getByLabel("Edit Result [m]", { exact: true }).fill("0");
   await page.getByRole("combobox", { name: "Cari assignee" }).fill("Operator");
   await page.getByRole("option", { name: /Operator Contoh/ }).click();
   await page.getByRole("button", { name: "Tempel data", exact: true }).click();
-  await page.getByLabel("Baris tujuan").fill("2");
+  // Numbered like the grid gutter: data row 2 sits under gutter label 3.
+  await page.getByLabel("Baris tujuan").fill("3");
   await page
     .getByLabel("Isi clipboard (TSV)")
     .fill("46269.291666666664\t46269.625\t52\t8954\t56\t10\t910");
@@ -273,9 +307,10 @@ test("grid, checkbox, assignee search, paste dan batch save mengikuti kontrak", 
   ).toBeVisible();
   await page.getByRole("button", { name: "Simpan perubahan" }).click();
   await expect(
-    page.getByRole("status").filter({ hasText: "1 ditambahkan" }),
+    page.getByRole("status").filter({ hasText: "2 baris tersimpan" }),
   ).toBeVisible();
-  await expect(page.getByText(/Tidak ada perubahan/)).toBeVisible();
+  // Nothing pending any more, and the status says when it landed.
+  await expect(page.getByText(/Tersimpan pukul \d{2}\.\d{2}/)).toBeVisible();
   expect(errors).toEqual([]);
   const accessibility = await new AxeBuilder({ page })
     .include(".manual-page")
@@ -360,7 +395,7 @@ test("impor CSV masuk sebagai draft lalu tersimpan lewat batch yang sama", async
 
   await page.getByRole("button", { name: "Simpan perubahan" }).click();
   await expect(
-    page.getByRole("status").filter({ hasText: "1 ditambahkan" }),
+    page.getByRole("status").filter({ hasText: "1 baris tersimpan" }),
   ).toBeVisible();
 
   // Kolom yang tertukar di file harus mendarat di field yang benar.
@@ -485,7 +520,8 @@ test("grid berkapasitas besar tetap responsif dan menerima ribuan baris", async 
   }).join("\n");
 
   await page.getByRole("button", { name: "Tempel data", exact: true }).click();
-  await page.getByLabel("Baris tujuan").fill("2");
+  // Numbered like the grid gutter: data row 2 sits under gutter label 3.
+  await page.getByLabel("Baris tujuan").fill("3");
   await page.getByLabel("Isi clipboard (TSV)").fill(tsv);
 
   const pasteStarted = Date.now();
@@ -521,7 +557,7 @@ test("grid berkapasitas besar tetap responsif dan menerima ribuan baris", async 
   });
 });
 
-test("impor file yang rusak menolak tanpa menyentuh draft", async ({
+test("baris file dengan kolom lebih ditandai per baris, impor tidak gagal total", async ({
   page,
 }) => {
   await mock(page);
@@ -540,11 +576,15 @@ test("impor file yang rusak menolak tanpa menyentuh draft", async ({
     ),
   });
 
-  await expect(page.getByText("7 kolom", { exact: false })).toBeVisible();
+  // Dulu satu baris lebar menggagalkan seluruh impor. Sekarang barisnya
+  // masuk ke draft dan masalahnya ditandai di baris itu, dengan nomor baris
+  // filenya, supaya baris lain di file yang sama tidak ikut tertahan.
   await expect(
-    page.getByRole("heading", { name: /Preview impor/ }),
-  ).toBeHidden();
-  await expect(page.getByText(/Tidak ada perubahan/)).toBeVisible();
+    page.getByRole("status").filter({
+      hasText: "1 baris dari kelebihan-kolom.csv masuk ke draft",
+    }),
+  ).toBeVisible();
+  await expect(page.getByText(/Baris file 1: .*7 kolom/).first()).toBeVisible();
 });
 
 test("penolakan versi mempertahankan draft dan bisa dibandingkan", async ({
@@ -798,7 +838,7 @@ test("klik kanan menolak menghapus baris yang sudah tersimpan", async ({
   );
 });
 
-test("tempel dari klik kanan masuk ke panel pratinjau, bukan langsung ke sel", async ({
+test("tempel dari klik kanan langsung masuk ke sel, dirapikan dan PIN-nya dicocokkan", async ({
   page,
   context,
 }) => {
@@ -810,7 +850,7 @@ test("tempel dari klik kanan masuk ke panel pratinjau, bukan langsung ke sel", a
   await expect(canvas).toBeVisible({ timeout: 45_000 });
   await page.evaluate(() =>
     navigator.clipboard.writeText(
-      "2026-09-05 07:00:00\t2026-09-05 15:00:00\t52\t8954\t56\t10\t910",
+      "2026-09-05 07:00:00\t2026-09-05 15:00:00\t52\t8954\t56,5\t10\t910",
     ),
   );
 
@@ -820,11 +860,21 @@ test("tempel dari klik kanan masuk ke panel pratinjau, bukan langsung ke sel", a
   await expect(menu).toBeVisible();
   await menu.getByText("Paste", { exact: true }).click();
 
-  // The clipboard text lands in the preview that normalises it, not in the
-  // cells: that panel is the only path that fixes decimal commas and
-  // single-digit hours and resolves an EID to a PIN.
-  await expect(page.getByLabel("Isi clipboard (TSV)")).toHaveValue(
-    /2026-09-05 07:00:00/,
+  await expect(page.getByText(/1 baris ditempel ke draft/)).toBeVisible();
+  // No preview step: the cells hold the row, normalised on the way in.
+  await expect(
+    page.getByRole("region", { name: "Preview clipboard" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Edit baris" }).click();
+  await canvas.click({ position: { x: 600, y: rowY(2) } });
+  await expect(page.getByLabel("Edit Station", { exact: true })).toHaveValue(
+    "52",
+  );
+  await expect(page.getByLabel("Edit Width [cm]", { exact: true })).toHaveValue(
+    "56.5",
+  );
+  await expect(page.getByLabel("Edit Result [m]", { exact: true })).toHaveValue(
+    "910",
   );
 });
 
@@ -846,7 +896,7 @@ test("hapus baris hanya membuang draft terpilih dan melindungi data tersimpan", 
   await expect(station).toHaveValue("51");
 
   await selected.uncheck();
-  await page.getByRole("button", { name: "Tambah baris" }).click();
+  await page.getByRole("button", { name: "Baris baru" }).click();
   await expect(station).toHaveValue("");
   await station.fill("99");
   await selected.check();
@@ -918,7 +968,9 @@ test("grid kosong: isi lewat editor, simpan, dan feedback terlihat di samping Si
   await result.fill("982");
 
   await page.getByRole("button", { name: "Simpan perubahan" }).click();
-  const notice = page.getByRole("status").filter({ hasText: "1 ditambahkan" });
+  const notice = page
+    .getByRole("status")
+    .filter({ hasText: "1 baris tersimpan" });
   await expect(notice).toBeVisible();
   expect(posted).toHaveLength(1);
   expect(posted[0]!.rows[0]).toMatchObject({ pin: "8954", resultMeter: "982" });
@@ -969,7 +1021,8 @@ test("admin membatalkan satu data tersimpan dengan alasan dan idempotency", asyn
     { timeout: 45000 },
   );
   await page.getByLabel("Pilih baris aktif", { exact: true }).check();
-  await page.getByRole("button", { name: "Batalkan data" }).click();
+  await page.getByRole("button", { name: "Lainnya" }).click();
+  await page.getByRole("menuitem", { name: "Batalkan data" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Batalkan data produksi" });
   await expect(dialog).toBeVisible();
@@ -1008,12 +1061,15 @@ test("buku CLOSED menonaktifkan seluruh aksi tulis", async ({ page }) => {
   await expect(page.locator(".manual-period-closed")).toHaveText("Tutup");
   for (const name of [
     "Simpan perubahan",
-    "Tambah baris",
+    "Baris baru",
     "Tempel data",
     "Impor file",
-    "Batalkan data",
   ])
     await expect(page.getByRole("button", { name })).toBeDisabled();
+  await page.getByRole("button", { name: "Lainnya" }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "Batalkan data" }),
+  ).toBeDisabled();
 });
 
 test("memilih buku memuat hanya rentang buku itu", async ({ page }) => {
@@ -1128,7 +1184,9 @@ test("tanpa buku: buat buku pertama dari layar lalu langsung terbuka", async ({
   });
 
   await page.goto("/manual-data");
-  await expect(page.getByText("Belum ada buku periode.")).toBeVisible({
+  await expect(
+    page.getByRole("heading", { name: "Belum ada buku periode" }),
+  ).toBeVisible({
     timeout: 45_000,
   });
   // Daftar buku hanya buku departemen produksi.
@@ -1136,7 +1194,7 @@ test("tanpa buku: buat buku pertama dari layar lalu langsung terbuka", async ({
 
   await page.getByRole("button", { name: "Buat buku pertama" }).click();
   const dialog = page.getByRole("dialog", { name: "Buat buku periode" });
-  const expected = monthBook(0, "OPEN");
+  const expected = cycleBook();
   await expect(dialog.getByLabel("Kode buku")).toHaveValue(expected.code);
   await expect(dialog.getByLabel("Tanggal mulai")).toHaveValue(
     expected.periodStart,
@@ -1201,6 +1259,85 @@ test("tutup buku meminta konfirmasi lalu membuat grid baca saja", async ({
   await expect(page.locator(".manual-period-closed")).toHaveText("Tutup");
   await expect(saveButton).toBeDisabled();
   await expect(page.getByRole("button", { name: "Tutup buku" })).toHaveCount(0);
+});
+
+test("ubah buku mengirim rowVersion dan pulih dari konflik versi", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const periods = defaultPeriods.map((period) => ({ ...period }));
+  await mock(page, {
+    periods,
+    extraPermissions: ["bag.payroll.generate"],
+  });
+  const current = periods[1]!;
+  const bodies: components["schemas"]["UpdatePayrollPeriodRequest"][] = [];
+  await page.route(`**/payroll-periods/${current.id}`, async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    expect(route.request().headers()["x-csrf-token"]).toBe("mock-csrf");
+    const body = route
+      .request()
+      .postDataJSON() as components["schemas"]["UpdatePayrollPeriodRequest"];
+    bodies.push(body);
+    // Percobaan pertama kalah balapan dengan admin lain.
+    if (bodies.length === 1) {
+      current.rowVersion = 2;
+      return route.fulfill({
+        status: 409,
+        json: {
+          error: {
+            code: "ROW_VERSION_CONFLICT",
+            message: "Row was modified by another user",
+            details: { currentRowVersion: 2 },
+            requestId: "e2e",
+          },
+        },
+      });
+    }
+    Object.assign(current, {
+      code: body.code,
+      periodStart: body.periodStart,
+      periodEnd: body.periodEnd,
+      rowVersion: current.rowVersion + 1,
+    });
+    return route.fulfill({ json: current });
+  });
+
+  await page.goto("/manual-data");
+  await expect(
+    page.getByRole("button", { name: "Simpan perubahan" }),
+  ).toBeEnabled({ timeout: 45_000 });
+  const originalCode = current.code;
+
+  await page.getByRole("button", { name: "Ubah buku" }).click();
+  let dialog = page.getByRole("dialog", { name: `Ubah buku ${originalCode}` });
+  const save = dialog.getByRole("button", { name: "Simpan perubahan buku" });
+  // Tanpa perubahan tidak ada yang dikirim.
+  await expect(save).toBeDisabled();
+  await dialog.getByLabel("Kode buku").fill(`${originalCode}-REV`);
+  await save.click();
+  await expect(dialog.getByRole("alert")).toContainText(
+    "baru saja diubah pengguna lain",
+  );
+  expect(bodies[0]).toMatchObject({
+    expectedRowVersion: 1,
+    code: `${originalCode}-REV`,
+    periodStart: current.periodStart,
+    periodEnd: current.periodEnd,
+  });
+
+  // Buka lagi: dialog memakai versi terbaru dari server.
+  await dialog.getByRole("button", { name: "Kembali" }).click();
+  await page.getByRole("button", { name: "Ubah buku" }).click();
+  dialog = page.getByRole("dialog", { name: `Ubah buku ${originalCode}` });
+  await dialog.getByLabel("Kode buku").fill(`${originalCode}-REV`);
+  await dialog.getByRole("button", { name: "Simpan perubahan buku" }).click();
+
+  await expect(dialog).not.toBeVisible();
+  expect(bodies[1]?.expectedRowVersion).toBe(2);
+  await expect(
+    page.getByRole("status").filter({ hasText: "diperbarui" }),
+  ).toContainText(`Buku ${originalCode}-REV diperbarui`);
 });
 
 test("tanpa izin payroll, tombol kelola buku tidak tampil", async ({
@@ -1296,7 +1433,7 @@ test("template Excel diimpor langsung ke grid lalu tersimpan", async ({
 
   await page.getByRole("button", { name: "Simpan perubahan" }).click();
   await expect(
-    page.getByRole("status").filter({ hasText: "3 ditambahkan" }),
+    page.getByRole("status").filter({ hasText: "3 baris tersimpan" }),
   ).toBeVisible();
   expect(posted).toHaveLength(1);
   expect(
@@ -1549,7 +1686,7 @@ test("hapus ribuan baris bermasalah yang berselang-seling tidak membuat tab cras
 
   await page.getByRole("button", { name: "Simpan perubahan" }).click();
   await expect(
-    page.getByRole("status").filter({ hasText: "2000 ditambahkan" }),
+    page.getByRole("status").filter({ hasText: "2.000 baris tersimpan" }),
   ).toBeVisible({ timeout: 60_000 });
   // Yang terkirim tepat baris yang sah, urut, tanpa lubang dan tanpa baris
   // tersimpan yang ikut tergeser.
@@ -1660,6 +1797,62 @@ test("impor file bisa dibatalkan dari modal progres tanpa mengubah draft", async
   ).toBeVisible();
 });
 
+test("impor yang belum disimpan bisa dibatalkan sekaligus, data tersimpan tetap", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await mock(page, { count: 2 });
+  let posted = 0;
+  await page.route("**/production-entry-batches", (route) => {
+    posted += 1;
+    return route.abort();
+  });
+  await page.goto("/manual-data");
+  await expect(
+    page.getByRole("button", { name: "Simpan perubahan" }),
+  ).toBeEnabled({ timeout: 45_000 });
+  await expect(
+    page.getByText("2 baris terisi", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Batalkan impor/ }),
+  ).toHaveCount(0);
+
+  await page
+    .locator('input[type="file"]')
+    .first()
+    .setInputFiles({
+      name: "produksi.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from(importCsv),
+    });
+  await expect(page.getByText("4 baris terisi", { exact: false })).toBeVisible({
+    timeout: 20_000,
+  });
+
+  await page
+    .getByRole("button", { name: "Batalkan impor produksi.csv" })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Batalkan impor produksi.csv?",
+  });
+  await expect(dialog).toContainText("2 baris dari impor ini dikembalikan");
+  await dialog.getByRole("button", { name: "Batalkan impor" }).click();
+
+  await expect(
+    page
+      .getByRole("status")
+      .filter({ hasText: "Impor produksi.csv dibatalkan" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("2 baris terisi", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Batalkan impor/ }),
+  ).toHaveCount(0);
+  expect(posted).toBe(0);
+});
+
 test("impor langsung ke server menampilkan persentase dan baris terkirim", async ({
   page,
 }) => {
@@ -1730,4 +1923,505 @@ test("impor langsung ke server menampilkan persentase dan baris terkirim", async
   ).toBeVisible();
   await expect(modal).toBeHidden({ timeout: 60_000 });
   expect(batches).toBe(5);
+});
+
+for (const width of [1024, 1440]) {
+  test(`Ctrl+V dari spreadsheet langsung mengisi sel mulai dari sel aktif (${width}px)`, async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.setViewportSize({ width, height: 900 });
+    await mock(page);
+    await page.goto("/manual-data");
+    const canvas = page.locator(SHEET_CANVAS);
+    await expect(canvas).toBeVisible({ timeout: 45_000 });
+    await page.evaluate(() =>
+      navigator.clipboard.writeText(
+        "2026-09-05 07:00:00\t2026-09-05 15:00:00\t52\t8954\t56\t10\t910\n" +
+          "2026-09-05 15:00:00\t2026-09-05 23:00:00\t53\t8954\t56\t10\t880",
+      ),
+    );
+    await canvas.click({ position: { x: 200, y: rowY(2) } });
+    await page.keyboard.press("ControlOrMeta+V");
+
+    await expect(page.getByText(/2 baris ditempel ke draft/)).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Preview clipboard" }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "Edit baris" }).click();
+    await canvas.click({ position: { x: 200, y: rowY(3) } });
+    await expect(page.getByLabel("Edit Station", { exact: true })).toHaveValue(
+      "53",
+    );
+    await expect(
+      page.getByLabel("Edit Result [m]", { exact: true }),
+    ).toHaveValue("880");
+  });
+}
+
+test("shift baris tersimpan bisa dikoreksi dari kalender dan dikirim sebagai PATCH, bukan baris baru", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await mock(page);
+  const batches: unknown[] = [];
+  await page.route("**/production-entry-batches", async (route) => {
+    batches.push(route.request().postDataJSON());
+    await route.abort();
+  });
+  const patches: unknown[] = [];
+  await page.route(`**/production-entries/${entry.id}`, async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    expect(route.request().headers()["x-csrf-token"]).toBe("mock-csrf");
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    patches.push(body);
+    await route.fulfill({
+      json: {
+        ...entry,
+        shiftStart: String(body.shiftStart),
+        shiftEnd: String(body.shiftEnd),
+        rowVersion: 4,
+      } satisfies components["schemas"]["ProductionEntry"],
+    });
+  });
+  await page.goto("/manual-data");
+  const canvas = page.locator(SHEET_CANVAS);
+  await expect(canvas).toBeVisible({ timeout: 45_000 });
+
+  // Sheet row 1 is the saved entry: its Shift Start still offers the calendar.
+  await canvas.click({ position: { x: 200, y: rowY(1) } });
+  await page
+    .getByRole("button", { name: "Pilih tanggal dan jam Shift Start baris 1" })
+    .click();
+  await page
+    .getByLabel("Shift Start", { exact: true })
+    .fill("2026-09-04T06:00");
+  await page.getByRole("button", { name: "Selesai" }).click();
+
+  // Station, the other half of the key, stays fixed on a saved row.
+  await page.getByRole("button", { name: "Edit baris" }).click();
+  await canvas.click({ position: { x: 200, y: rowY(1) } });
+  await expect(
+    page.getByLabel("Edit Shift Start", { exact: true }),
+  ).toBeEnabled();
+  await expect(page.getByLabel("Edit Station", { exact: true })).toBeDisabled();
+
+  await page.getByRole("button", { name: "Simpan perubahan" }).click();
+  const receipt = page.getByRole("region", { name: "Proses simpan" });
+  await expect(receipt.getByRole("status")).toContainText("1 baris tersimpan");
+  await expect(receipt).toContainText("1 shift dipindah");
+  expect(patches).toEqual([
+    {
+      expectedRowVersion: 3,
+      shiftStart: "2026-09-04T06:00:00+07:00",
+      shiftEnd: "2026-09-04T15:00:00+07:00",
+      pin: "8954",
+      widthCm: "56",
+      weftDensity: "10",
+      resultMeter: "900",
+    },
+  ]);
+  expect(batches).toEqual([]);
+  // Adopted as saved at the server's version: nothing left to send.
+  await page.getByRole("button", { name: "Simpan perubahan" }).click();
+  await expect(
+    page.getByText(/Tidak ada perubahan untuk disimpan/),
+  ).toBeVisible();
+});
+
+test("shift tersimpan yang bentrok ditolak per baris dan draft-nya tetap ada", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await mock(page);
+  await page.route(`**/production-entries/${entry.id}`, async (route) => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    await route.fulfill({
+      status: 409,
+      json: {
+        error: {
+          code: "UNIQUE_KEY_CONFLICT",
+          message:
+            "Sudah ada baris lain dengan kombinasi shiftStart, shiftEnd, dan stationNo yang sama",
+          requestId: "req-1",
+        },
+      },
+    });
+  });
+  await page.goto("/manual-data");
+  const canvas = page.locator(SHEET_CANVAS);
+  await expect(canvas).toBeVisible({ timeout: 45_000 });
+  await canvas.click({ position: { x: 200, y: rowY(1) } });
+  await page
+    .getByRole("button", { name: "Pilih tanggal dan jam Shift Start baris 1" })
+    .click();
+  await page
+    .getByLabel("Shift Start", { exact: true })
+    .fill("2026-09-04T06:00");
+  await page.getByRole("button", { name: "Selesai" }).click();
+  await page.getByRole("button", { name: "Simpan perubahan" }).click();
+
+  await expect(
+    page.getByText(/0 baris tersimpan dipindah shift-nya, 1 ditolak/),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByText("Sudah ada baris lain dengan shift dan station yang sama.")
+      .first(),
+  ).toBeVisible();
+  // The refused row keeps its edit, still unsaved, for the admin to fix.
+  await expect(page.getByText("Ada draft belum disimpan")).toBeVisible();
+  await page.getByRole("button", { name: "Edit baris" }).click();
+  await canvas.click({ position: { x: 200, y: rowY(1) } });
+  await expect(
+    page.getByLabel("Edit Shift Start", { exact: true }),
+  ).toHaveValue(/^2026-09-04T06:00/);
+});
+
+test("sel merah yang sudah diperbaiki langsung kehilangan tanda dan pesannya", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await mock(page);
+  await page.goto("/manual-data");
+  const canvas = page.locator(SHEET_CANVAS);
+  await expect(canvas).toBeVisible({ timeout: 45_000 });
+  // Two rows, both missing Result.
+  await page.evaluate(() =>
+    navigator.clipboard.writeText(
+      "2026-09-05 07:00:00\t2026-09-05 15:00:00\t52\t8954\t56\t10\t\n" +
+        "2026-09-05 15:00:00\t2026-09-05 23:00:00\t53\t8954\t56\t10\t",
+    ),
+  );
+  await canvas.click({ position: { x: 200, y: rowY(2) } });
+  await page.keyboard.press("ControlOrMeta+V");
+  await expect(page.getByText(/2 sel perlu diperbaiki/)).toBeVisible();
+  const problem = page.getByText(/^Kosong\. Tulis 0/).first();
+  await expect(problem).toBeVisible();
+
+  await page.getByRole("button", { name: "Edit baris" }).click();
+  await canvas.click({ position: { x: 200, y: rowY(2) } });
+  await page.getByLabel("Edit Result [m]", { exact: true }).fill("910");
+  // One fixed, one left: only the fixed one goes.
+  await expect(page.locator(".manual-row-problem")).toHaveCount(0);
+  // The banner counts down with the fixes instead of keeping the import's number.
+  await expect(page.getByText(/1 sel perlu diperbaiki/)).toBeVisible();
+  await canvas.click({ position: { x: 200, y: rowY(3) } });
+  await expect(page.locator(".manual-row-problem")).toContainText("Result [m]");
+
+  await page.getByLabel("Edit Result [m]", { exact: true }).fill("880");
+  await expect(page.locator(".manual-row-problem")).toHaveCount(0);
+  await expect(page.getByText(/^Kosong\. Tulis 0/)).toHaveCount(0);
+  // None left: the red banner gives way to the next step.
+  await expect(page.getByText(/sel perlu diperbaiki/)).toHaveCount(0);
+  await expect(page.locator(".manual-status-failed")).toHaveCount(0);
+  await expect(
+    page.getByText("Semua sel yang bermasalah sudah diperbaiki", {
+      exact: false,
+    }),
+  ).toBeVisible();
+});
+
+test("sheet sepanjang datanya ditambah baris kosong, dan memanjang saat baris jauh dituju", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await mock(page);
+  await page.goto("/manual-data");
+  const canvas = page.locator(SHEET_CANVAS);
+  await expect(canvas).toBeVisible({ timeout: 45_000 });
+  await page.getByRole("button", { name: "Edit baris" }).click();
+  const active = page.getByLabel("Baris aktif", { exact: true });
+
+  // Well past the 1 saved row + 50 spare the sheet opens with: the sheet
+  // grows to reach it instead of refusing a row that does not exist yet.
+  await active.fill("200");
+  await expect(active).toHaveValue("200");
+  await page.getByLabel("Pilih baris aktif", { exact: true }).check();
+  await expect(page.getByText(/1 dipilih/)).toBeVisible();
+  await page.getByLabel("Edit Result [m]", { exact: true }).fill("5");
+  await expect(page.getByLabel("Edit Result [m]", { exact: true })).toHaveValue(
+    "5",
+  );
+
+  // Scrolled to the bottom, the sheet ends a little past row 200 — not at
+  // the 100.001 rows of capacity it used to open with.
+  await canvas.hover();
+  for (let step = 0; step < 12; step++) await page.mouse.wheel(0, 4000);
+  await page.screenshot({ path: "test-results/sheet-bottom.png" });
+});
+
+test("tambah sejumlah baris kosong di bawah sheet, seperti spreadsheet", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await mock(page);
+  await page.goto("/manual-data");
+  const canvas = page.locator(SHEET_CANVAS);
+  await expect(canvas).toBeVisible({ timeout: 45_000 });
+
+  const form = page.getByRole("form", { name: "Tambah baris kosong di bawah" });
+  await expect(form.getByLabel("Jumlah baris yang ditambahkan")).toHaveValue(
+    "1000",
+  );
+  await form.getByLabel("Jumlah baris yang ditambahkan").fill("250");
+  await form.getByRole("button", { name: "Tambah" }).click();
+  await expect(
+    page.getByText("250 baris kosong ditambahkan di bawah."),
+  ).toBeVisible();
+  await page.screenshot({ path: "test-results/add-rows.png" });
+
+  await form.getByLabel("Jumlah baris yang ditambahkan").fill("0");
+  await form.getByRole("button", { name: "Tambah" }).click();
+  await expect(page.getByText("Isi jumlah baris minimal 1.")).toBeVisible();
+});
+
+test("kapasitas draft punya tips apa yang dilakukan saat penuh", async ({
+  page,
+}) => {
+  await mock(page);
+  for (const [width, height] of [
+    [1440, 900],
+    [1024, 875],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    await page.goto("/manual-data");
+    await expect(page.locator(SHEET_CANVAS)).toBeVisible({ timeout: 45_000 });
+    const tip = page.locator(".manual-capacity-tip");
+    await tip.locator("summary").click();
+    const body = tip.locator(".manual-capacity-tip-body");
+    await expect(body).toBeInViewport({ ratio: 1 });
+    await expect(body).toContainText("Kalau kapasitas draft penuh");
+    await expect(body).toContainText("Muat ulang");
+    await expect(body).toContainText("Impor file");
+    await page.screenshot({ path: `test-results/capacity-tip-${width}.png` });
+  }
+});
+
+test("kembali ke Manual Data setelah Simpan memuat ulang isi server, bukan cache sebelum Simpan", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await mock(page, { count: 0 });
+  let saved = false;
+  await page.route("**/production-entries?*", (route) =>
+    route.fulfill({
+      json: {
+        data: saved ? [entry] : [],
+        page: { ...cursor, pageSize: 100 },
+        sourceRevision: saved ? "2" : "1",
+      } satisfies components["schemas"]["ProductionEntryListResponse"],
+    }),
+  );
+  await page.route("**/production-entry-batches", async (route) => {
+    const body = route
+      .request()
+      .postDataJSON() as components["schemas"]["ProductionEntryBatchRequest"];
+    saved = true;
+    await route.fulfill({
+      json: {
+        batchId: "20000000-0000-4000-8000-000000000009",
+        sourceRevision: "2",
+        counts: { inserted: 1, updated: 0, unchanged: 0, rejected: 0 },
+        rows: [
+          {
+            clientRowId: body.rows[0]!.clientRowId,
+            productionEntryId: entry.id,
+            rowVersion: 1,
+            outcome: "INSERTED",
+          },
+        ],
+      } satisfies components["schemas"]["ProductionEntryBatchResult"],
+    });
+  });
+  await page.goto("/manual-data");
+  await page.getByRole("button", { name: "Edit baris" }).click();
+  const book = defaultPeriods[1]!;
+  await page
+    .getByLabel("Edit Shift Start", { exact: true })
+    .fill(`${book.periodStart}T07:00`);
+  await page
+    .getByLabel("Edit Shift End", { exact: true })
+    .fill(`${book.periodStart}T15:00`);
+  await page.getByLabel("Edit Station", { exact: true }).fill("51");
+  await page.getByRole("combobox", { name: "Cari assignee" }).fill("Operator");
+  await page.getByRole("option", { name: /Operator Contoh/ }).click();
+  await page.getByLabel("Edit Width [cm]", { exact: true }).fill("56");
+  await page.getByLabel("Edit Weft [s/in]", { exact: true }).fill("10");
+  await page.getByLabel("Edit Result [m]", { exact: true }).fill("982");
+  await page.getByRole("button", { name: "Simpan perubahan" }).click();
+  await expect(page.getByText(/1 baris tersimpan/)).toBeVisible();
+
+  await page.getByRole("link", { name: "Detail" }).click();
+  await expect(page).toHaveURL(/\/detail/);
+  await page.getByRole("link", { name: "Manual Data" }).click();
+  await expect(page.getByText("1 baris dari server")).toBeVisible({
+    timeout: 45_000,
+  });
+});
+
+test("baris bertanggal di luar buku ditandai kuning dan dikonfirmasi sebelum Simpan", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await mock(page);
+  const posted: components["schemas"]["ProductionEntryBatchRequest"][] = [];
+  await page.route("**/production-entry-batches", async (route) => {
+    const body = route
+      .request()
+      .postDataJSON() as components["schemas"]["ProductionEntryBatchRequest"];
+    posted.push(body);
+    await route.fulfill({
+      json: {
+        batchId: "20000000-0000-4000-8000-00000000000a",
+        sourceRevision: "2",
+        counts: { inserted: 0, updated: 0, unchanged: 0, rejected: 1 },
+        rows: body.rows.map((row) => ({
+          clientRowId: row.clientRowId,
+          outcome: "REJECTED" as const,
+          fieldErrors: [
+            {
+              field: "shiftStart",
+              code: "PERIOD_NOT_FOUND",
+              message: "Tidak ada buku periode yang mencakup tanggal itu.",
+            },
+          ],
+        })),
+      } satisfies components["schemas"]["ProductionEntryBatchResult"],
+    });
+  });
+  await page.goto("/manual-data");
+  const canvas = page.locator(SHEET_CANVAS);
+  await expect(canvas).toBeVisible({ timeout: 45_000 });
+
+  // A row dated in NEXT month's book, pasted while this month's is open.
+  const next = defaultPeriods[2]!;
+  await page.evaluate(
+    (day) =>
+      navigator.clipboard.writeText(
+        `${day} 07:00:00\t${day} 15:00:00\t60\t8954\t56\t10\t900`,
+      ),
+    next.periodStart,
+  );
+  await canvas.click({ position: { x: 200, y: rowY(2) } });
+  await page.keyboard.press("ControlOrMeta+V");
+  const note = page.locator(".manual-outside-book");
+  await expect(note).toContainText(
+    `1 baris di luar buku ${defaultPeriods[1]!.code}`,
+  );
+  await note.getByRole("button", { name: /Lihat baris 3/ }).click();
+
+  // Cancelled: nothing is sent.
+  await page.getByRole("button", { name: "Simpan perubahan" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("di luar buku");
+  await dialog.getByRole("button", { name: "Periksa dulu" }).click();
+  expect(posted).toHaveLength(0);
+
+  // Confirmed: sent, and the server's `shiftStart` rejection lands on the
+  // Shift Start column instead of an unnamed field.
+  await page.getByRole("button", { name: "Simpan perubahan" }).click();
+  await dialog.getByRole("button", { name: "Tetap simpan" }).click();
+  await expect.poll(() => posted.length).toBe(1);
+  await expect(page.getByText(/0 baris tersimpan, 1 ditolak/)).toBeVisible();
+  await expect(page.locator(".manual-row-problem")).toContainText(
+    "Shift Start",
+  );
+});
+
+test("simpan terlihat dari tombol sampai hasil: tahap, progres, lalu rincian", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await mock(page);
+  let release: () => void = () => {};
+  const answered = new Promise<void>((resolve) => (release = resolve));
+  await page.route("**/production-entry-batches", async (route) => {
+    const body = route
+      .request()
+      .postDataJSON() as components["schemas"]["ProductionEntryBatchRequest"];
+    await answered;
+    await route.fulfill({
+      json: {
+        batchId: "20000000-0000-4000-8000-00000000000b",
+        sourceRevision: "2",
+        counts: { inserted: 2, updated: 0, unchanged: 0, rejected: 1 },
+        rows: body.rows.map((row, index) =>
+          index < 2
+            ? {
+                clientRowId: row.clientRowId,
+                productionEntryId: `30000000-0000-4000-8000-00000000010${index}`,
+                rowVersion: 1,
+                outcome: "INSERTED" as const,
+              }
+            : {
+                clientRowId: row.clientRowId,
+                outcome: "REJECTED" as const,
+                fieldErrors: [
+                  {
+                    field: "stationNo",
+                    code: "STATION_NOT_FOUND",
+                    message: "Station tidak terdaftar.",
+                  },
+                ],
+              },
+        ),
+      } satisfies components["schemas"]["ProductionEntryBatchResult"],
+    });
+  });
+  await page.goto("/manual-data");
+  const canvas = page.locator(SHEET_CANVAS);
+  await expect(canvas).toBeVisible({ timeout: 45_000 });
+  const day = defaultPeriods[1]!.periodStart;
+  await page.evaluate(
+    (day) =>
+      navigator.clipboard.writeText(
+        [60, 61, 62]
+          .map(
+            (station, index) =>
+              `${day} 0${index + 1}:00:00\t${day} 1${index + 1}:00:00\t${station}\t8954\t56\t10\t900`,
+          )
+          .join("\n"),
+      ),
+    day,
+  );
+  await canvas.click({ position: { x: 200, y: rowY(2) } });
+  await page.keyboard.press("ControlOrMeta+V");
+  await expect(page.getByText(/3 baris ditempel/)).toBeVisible();
+
+  const save = page.getByRole("button", { name: "Simpan perubahan" });
+  await save.click();
+  const panel = page.getByRole("region", { name: "Proses simpan" });
+  // While the server has not answered: the button and the steps say so.
+  await expect(save).toHaveAttribute("aria-busy", "true");
+  await expect(save).toHaveText(/Menyimpan/);
+  await expect(panel.locator('[aria-current="step"]')).toHaveText(
+    "Kirim ke server",
+  );
+  await expect(panel).toContainText("Mengirim 3 baris");
+  await page.screenshot({ path: "test-results/save-running.png" });
+
+  release();
+  await expect(panel.getByRole("status")).toHaveText(
+    /2 baris tersimpan, 1 ditolak · pukul \d{2}\.\d{2}/,
+  );
+  await expect(
+    panel.getByRole("listitem").filter({ hasText: /^\d+ baru$/ }),
+  ).toHaveText("2 baru");
+  await expect(save).toHaveText("Simpan");
+  await panel
+    .getByRole("button", { name: /Lihat baris ditolak pertama \(baris 5\)/ })
+    .click();
+  await expect(page.locator(".manual-row-problem")).toContainText("Station");
+  await page.screenshot({ path: "test-results/save-done.png" });
+  await page.setViewportSize({ width: 1024, height: 875 });
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: "test-results/save-done-1024.png" });
 });

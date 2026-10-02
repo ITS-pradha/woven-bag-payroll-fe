@@ -561,12 +561,62 @@ test("superadmin dapat memulai konfigurasi harga pertama dari kondisi kosong", a
     });
   });
 
+  await page.route("**/station-group-versions?pageSize=50", (route) =>
+    route.fulfill({
+      json: {
+        data: [],
+        page: { pageSize: 50, hasNextPage: false, nextCursor: null },
+      },
+    }),
+  );
   await page.goto("/rates");
 
-  await page.getByRole("button", { name: "Tambah konfigurasi harga" }).click();
+  // No version yet: one button, inside the empty state — not a second copy
+  // of it in the header.
+  const empty = page.getByRole("region", { name: "Belum ada versi harga" });
+  await expect(empty).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Tambah konfigurasi harga" }),
+  ).toHaveCount(1);
+  for (const [name, width, height] of [
+    ["desktop", 1440, 900],
+    ["mobile", 390, 780],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    await page.screenshot({ path: `test-results/empty-rates-${name}.png` });
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await page
+    .getByRole("tab", { name: "Kelompok mesin" })
+    .or(page.getByRole("button", { name: "Kelompok mesin" }))
+    .click();
+  const stations = page.getByRole("region", {
+    name: "Belum ada kelompok mesin",
+  });
+  await expect(stations).toBeVisible();
+  await expect(
+    page.getByRole("combobox", { name: "Versi kelompok mesin" }),
+  ).toBeHidden();
+  for (const [name, width, height] of [
+    ["desktop", 1440, 900],
+    ["mobile", 390, 780],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    await page.screenshot({ path: `test-results/empty-stations-${name}.png` });
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await stations
+    .getByRole("button", { name: "Buat versi mapping pertama" })
+    .click();
+  await expect(stations).toHaveCount(0);
+  await page.getByRole("button", { name: "Tabel harga" }).click();
+
+  await empty.getByRole("button", { name: "Tambah konfigurasi harga" }).click();
   await expect(
     page.getByRole("heading", { name: "Buat konfigurasi harga pertama" }),
   ).toBeVisible();
+  await expect(empty).toHaveCount(0);
   await expect(page.getByLabel("Kode jadwal")).toBeVisible();
   await expect(page.getByLabel("Kelompok mesin")).toBeVisible();
   await page.getByLabel("Kode versi baru").fill("HB-CS-2026-V1");

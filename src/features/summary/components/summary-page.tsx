@@ -11,7 +11,6 @@ import { useSearchParams } from "react-router-dom";
 import { ApiClientError } from "../../../api/client/api-result";
 import {
   createHrisSync,
-  createPayrollPeriod,
   createPayrollRun,
   getHrisSync,
   listPayrollRuns,
@@ -21,7 +20,7 @@ import {
 } from "../api/summary-api";
 import {
   finalAttendanceQueryOptions,
-  payrollPeriodsQueryOptions,
+  periodBooksQueryOptions,
   payrollRunQueryOptions,
   payrollRunsQueryKey,
   selectableRateVersionsQueryOptions,
@@ -32,14 +31,27 @@ import {
   type MachineGroup,
   type RateSelection,
 } from "../model/rate-selection";
-import { defaultPayrollPeriod } from "../model/summary-draft";
+import { selectPeriodBook, sortPeriodBooks } from "../model/period-book";
 import {
   GeneratePayrollForm,
+  type PeriodBookState,
   type RatePickerState,
 } from "./generate-payroll-form";
+import {
+  GenerateProgress,
+  type GenerateProgressState,
+} from "./generate-progress";
+import {
+  HrisSyncProgress,
+  type HrisSyncProgressState,
+} from "./hris-sync-progress";
+import { HRIS_SYNC_PHASES, type HrisSyncPhase } from "../model/hris-sync-phase";
 import { PayrollRunSelector } from "./payroll-run-selector";
 import { PayrollTransitionDialog } from "./payroll-transition-dialog";
-import { SummaryWorkspace } from "./summary-workspace";
+import { SummaryLoading, SummaryWorkspace } from "./summary-workspace";
+import { SelectorSkeleton } from "../../../components/skeleton/skeleton";
+import { EmptyState } from "../../../components/empty-state/empty-state";
+import { SummaryEmptyBackdrop } from "./summary-empty-backdrop";
 
 interface SummaryPageProps {
   canRead: boolean;
@@ -66,9 +78,16 @@ const REGENERATABLE: ReadonlySet<PayrollRun["status"]> = new Set([
 ]);
 
 interface GenerateAttempt {
-  periodKey: string;
+  /** Buku tempat kunci ini dibuat; kunci tidak dipakai ulang di buku lain. */
+  bookId: string;
   runKey: string;
 }
+
+/**
+ * Departemen di HRIS untuk tarik attendance. Berbeda dari departemen buku
+ * periode (`VITE_PRODUCTION_DEPARTMENT_CODE`), yang dipakai daftar buku.
+ */
+const HRIS_DEPARTMENT_CODE = "LOOM";
 
 export function SummaryPage(props: SummaryPageProps) {
   const confirm = useConfirm();
@@ -84,9 +103,8 @@ export function SummaryPage(props: SummaryPageProps) {
   } = props;
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialPeriod = defaultPayrollPeriod(todayInJakarta());
-  const [periodStart, setPeriodStart] = useState(initialPeriod.periodStart);
-  const [periodEnd, setPeriodEnd] = useState(initialPeriod.periodEnd);
+  /** Pilihan pengguna; null = buku bawaan (lihat `selectPeriodBook`). */
+  const [pickedBookId, setPickedBookId] = useState<string | null>(null);
   const [requestedRunId, setRequestedRunId] = useState(
     searchParams.get("run") ?? "",
   );
@@ -108,14 +126,28 @@ export function SummaryPage(props: SummaryPageProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [summaryDirty, setSummaryDirty] = useState(false);
-  const filter = { periodStart, periodEnd, departmentCode: "LOOM" };
-  const payrollPeriods = useQuery({
-    ...payrollPeriodsQueryOptions(filter),
-    enabled: canRead && validPeriod(periodStart, periodEnd),
-  });
+  const booksQuery = useQuery(periodBooksQueryOptions(canRead));
+  const books = booksQuery.data ? sortPeriodBooks(booksQuery.data.data) : [];
+  const selectedBook = selectPeriodBook(books, pickedBookId, todayInJakarta());
+  const bookState: PeriodBookState = booksQuery.isPending
+    ? { kind: "loading" }
+    : booksQuery.isError
+      ? {
+          kind: "error",
+          message: apiMessage(booksQuery.error),
+          onRetry: () => void booksQuery.refetch(),
+        }
+      : { kind: "ready", books };
+  const periodStart = selectedBook?.periodStart ?? "";
+  const periodEnd = selectedBook?.periodEnd ?? "";
+  const filter = {
+    periodStart,
+    periodEnd,
+    departmentCode: HRIS_DEPARTMENT_CODE,
+  };
   const attendancePeriods = useQuery({
     ...finalAttendanceQueryOptions(filter),
-    enabled: canRead && validPeriod(periodStart, periodEnd),
+    enabled: canRead && selectedBook !== null,
   });
   const attendance = attendancePeriods.data
     ? [...attendancePeriods.data.data].sort(
@@ -169,33 +201,45 @@ export function SummaryPage(props: SummaryPageProps) {
             },
           };
 
+  /**
+   * Pop-up generate. `retry` mengulang permintaan yang sama persis (kunci
+   * idempotensi dan payload yang sama) bila gagal sebelum run terbentuk.
+   */
+  const [generateJob, setGenerateJob] = useState<
+    (GenerateProgressState & { retry: () => void }) | null
+  >(null);
+  // Kunci query yang sama dengan run terpilih: status di-polling sekali saja.
+  const generateJobRun = useQuery(
+    payrollRunQueryOptions(generateJob?.runId ?? ""),
+  ).data;
+  const attachRun = (runId: string) =>
+    setGenerateJob((job) => (job ? { ...job, runId } : job));
+  const failGenerate = (cause: unknown) =>
+    setGenerateJob((job) => (job ? { ...job, error: apiMessage(cause) } : job));
+  const openGenerateJob = (
+    job: Omit<GenerateProgressState, "startedAt">,
+    send: () => void,
+  ) => {
+    const launch = () => {
+      setMessage("");
+      setError("");
+      setGenerateJob({ ...job, startedAt: Date.now(), retry: launch });
+      send();
+    };
+    launch();
+  };
+
   const generateMutation = useMutation({
     mutationFn: async (attempt: GenerateAttempt) => {
+      if (!selectedBook || selectedBook.id !== attempt.bookId)
+        throw new Error("Pilih buku periode terlebih dahulu.");
       if (!attendance)
         throw new Error("Attendance periode ini belum dikonfirmasi HRD.");
-      const existing = payrollPeriods.data?.data.find(
-        (item) =>
-          item.periodStart === periodStart && item.periodEnd === periodEnd,
-      );
-      const period =
-        existing ??
-        (await createPayrollPeriod(
-          {
-            key: attempt.periodKey,
-            body: {
-              code: `LOOM-${periodEnd.slice(0, 7)}`,
-              periodStart,
-              periodEnd,
-              departmentCode: "LOOM",
-            },
-          },
-          csrfToken,
-        ));
       return createPayrollRun(
         {
           key: attempt.runKey,
           body: {
-            periodId: period.id,
+            periodId: selectedBook.id,
             attendancePeriodId: attendance.id,
             ...(rateVersionIds ? { rateVersionIds } : {}),
           },
@@ -212,13 +256,9 @@ export function SummaryPage(props: SummaryPageProps) {
       setRequestedRunId(run.id);
       setSearchParams({ run: run.id }, { replace: true });
       setGenerateAttempt(null);
-      setMessage("Payroll masuk antrean dan akan diperbarui otomatis.");
-      setError("");
+      attachRun(run.id);
     },
-    onError: (cause) => {
-      setMessage("");
-      setError(apiMessage(cause));
-    },
+    onError: (cause) => failGenerate(cause),
   });
 
   /**
@@ -256,39 +296,69 @@ export function SummaryPage(props: SummaryPageProps) {
       setRequestedRunId(run.id);
       setSearchParams({ run: run.id }, { replace: true });
       setRegenerateAttempt(null);
-      setMessage(
-        `Run #${run.runNo} masuk antrean dan akan diperbarui otomatis.`,
-      );
-      setError("");
+      attachRun(run.id);
     },
-    onError: (cause) => {
-      setMessage("");
-      setError(apiMessage(cause));
-    },
+    onError: (cause) => failGenerate(cause),
   });
   const canRegenerate =
     canGenerate &&
     selectedRun !== undefined &&
     REGENERATABLE.has(selectedRun.status);
 
+  const [syncProgress, setSyncProgress] =
+    useState<HrisSyncProgressState | null>(null);
   const syncMutation = useMutation({
     mutationFn: async () => {
+      // Tidak pernah mundur: QUEUED setelah SYNCING berarti worker sedang
+      // mengulang percobaan yang gagal, bukan tugas yang belum diambil.
+      const advance = (phase: HrisSyncPhase) =>
+        setSyncProgress((current) => {
+          if (!current) return current;
+          const next = HRIS_SYNC_PHASES.indexOf(phase);
+          const shown = HRIS_SYNC_PHASES.indexOf(current.phase);
+          return next >= shown
+            ? { ...current, phase }
+            : { ...current, retrying: true };
+        });
+      setSyncProgress({
+        phase: "request",
+        periodStart: filter.periodStart,
+        periodEnd: filter.periodEnd,
+        startedAt: Date.now(),
+      });
       const started = await createHrisSync(
         { key: crypto.randomUUID(), body: filter },
         csrfToken,
       );
-      return waitForHrisSync(started.syncId);
+      advance(syncPhaseOf(started.status));
+      return waitForHrisSync(started.syncId, (sync) =>
+        advance(syncPhaseOf(sync.status)),
+      );
     },
-    onSuccess: () => {
+    onSuccess: (sync) => {
       void queryClient.invalidateQueries({ queryKey: ["attendance-periods"] });
-      setError("");
-      setMessage("Attendance FINAL berhasil ditarik dari HRIS.");
+      setSyncProgress((current) =>
+        current
+          ? {
+              ...current,
+              phase: "done",
+              hrisRevision: sync.hrisRevision,
+              recordCount: sync.recordCount,
+            }
+          : current,
+      );
     },
     onError: (cause) => {
-      setMessage("");
-      setError(apiMessage(cause));
+      setSyncProgress((current) =>
+        current ? { ...current, error: apiMessage(cause) } : current,
+      );
     },
   });
+  const startSync = () => {
+    setMessage("");
+    setError("");
+    syncMutation.mutate();
+  };
 
   const transitionMutation = useMutation({
     mutationFn: ({
@@ -403,11 +473,20 @@ export function SummaryPage(props: SummaryPageProps) {
                       key: crypto.randomUUID(),
                     };
               setRegenerateAttempt(attempt);
-              regenerateMutation.mutate({
-                source,
-                key: attempt.key,
-                rateVersionIds,
-              });
+              openGenerateJob(
+                {
+                  kind: "regenerate",
+                  periodStart,
+                  periodEnd,
+                  sourceRunNo: source.runNo,
+                },
+                () =>
+                  regenerateMutation.mutate({
+                    source,
+                    key: attempt.key,
+                    rateVersionIds,
+                  }),
+              );
             }}
           >
             {regenerateMutation.isPending ? "Menjadwalkan…" : "Generate ulang"}
@@ -451,8 +530,8 @@ export function SummaryPage(props: SummaryPageProps) {
         ) : null}
       </header>
       <GeneratePayrollForm
-        periodStart={periodStart}
-        periodEnd={periodEnd}
+        books={bookState}
+        selectedBook={selectedBook}
         attendance={attendance}
         attendanceLoading={attendancePeriods.isPending}
         canGenerate={canGenerate}
@@ -460,18 +539,11 @@ export function SummaryPage(props: SummaryPageProps) {
         canSync={canSync}
         rates={ratePicker}
         syncing={syncMutation.isPending}
-        onSync={() => {
-          setMessage("");
-          setError("");
-          syncMutation.mutate();
-        }}
-        onPeriodStartChange={(value) => {
-          setPeriodStart(value);
+        onSync={startSync}
+        onBookChange={(bookId) => {
+          setPickedBookId(bookId);
           setGenerateAttempt(null);
-        }}
-        onPeriodEndChange={(value) => {
-          setPeriodEnd(value);
-          setGenerateAttempt(null);
+          if (!syncMutation.isPending) setSyncProgress(null);
         }}
         onGenerate={async () => {
           if (
@@ -485,15 +557,33 @@ export function SummaryPage(props: SummaryPageProps) {
             }))
           )
             return;
+          if (!selectedBook) return;
           setSummaryDirty(false);
-          const attempt = generateAttempt ?? {
-            periodKey: crypto.randomUUID(),
-            runKey: crypto.randomUUID(),
-          };
+          const attempt =
+            generateAttempt?.bookId === selectedBook.id
+              ? generateAttempt
+              : { bookId: selectedBook.id, runKey: crypto.randomUUID() };
           setGenerateAttempt(attempt);
-          generateMutation.mutate(attempt);
+          openGenerateJob({ kind: "generate", periodStart, periodEnd }, () =>
+            generateMutation.mutate(attempt),
+          );
         }}
       />
+      {generateJob ? (
+        <GenerateProgress
+          state={generateJob}
+          run={generateJobRun}
+          onRetry={canGenerate ? generateJob.retry : undefined}
+          onDismiss={() => setGenerateJob(null)}
+        />
+      ) : null}
+      {syncProgress ? (
+        <HrisSyncProgress
+          state={syncProgress}
+          onRetry={canSync ? startSync : undefined}
+          onDismiss={() => setSyncProgress(null)}
+        />
+      ) : null}
       {message ? (
         <p
           role="status"
@@ -511,11 +601,7 @@ export function SummaryPage(props: SummaryPageProps) {
         </p>
       ) : null}
       {runsQuery.isPending ? (
-        <div
-          aria-busy="true"
-          aria-label="Memuat histori payroll"
-          className="h-16 animate-pulse border border-border bg-surface-muted"
-        />
+        <SelectorSkeleton label="Memuat histori payroll" />
       ) : null}
       {runsQuery.isError ? (
         <ErrorHistory onRetry={() => void runsQuery.refetch()} />
@@ -549,11 +635,7 @@ export function SummaryPage(props: SummaryPageProps) {
         <EmptyRuns />
       ) : null}
       {runQuery.isPending && selectedRunId ? (
-        <div
-          aria-busy="true"
-          aria-label="Memuat payroll run"
-          className="h-64 animate-pulse border border-border bg-surface-muted"
-        />
+        <SummaryLoading label="Memuat payroll run" />
       ) : null}
       {runQuery.isError ? (
         <ErrorHistory onRetry={() => void runQuery.refetch()} />
@@ -598,12 +680,16 @@ const SYNC_POLL_LIMIT_MS = 90_000;
  * that never leaves QUEUED almost always means the worker is not running;
  * saying so beats a spinner that never ends.
  */
-async function waitForHrisSync(syncId: string) {
+async function waitForHrisSync(
+  syncId: string,
+  onUpdate: (sync: Awaited<ReturnType<typeof getHrisSync>>) => void,
+) {
   const deadline = Date.now() + SYNC_POLL_LIMIT_MS;
   let lastFailure = "";
 
   while (Date.now() < deadline) {
     const sync = await getHrisSync(syncId);
+    onUpdate(sync);
     if (sync.status === "COMPLETED") return sync;
     lastFailure = sync.failure?.error.message ?? lastFailure;
     if (sync.status === "FAILED")
@@ -618,6 +704,15 @@ async function waitForHrisSync(syncId: string) {
   );
 }
 
+function syncPhaseOf(
+  status: Awaited<ReturnType<typeof getHrisSync>>["status"],
+): HrisSyncPhase {
+  if (status === "QUEUED") return "queued";
+  if (status === "COMPLETED") return "done";
+  // SYNCING, dan FAILED yang berhenti di tahap tarik.
+  return "syncing";
+}
+
 function todayInJakarta() {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Jakarta",
@@ -630,13 +725,6 @@ function todayInJakarta() {
   return `${read("year")}-${read("month")}-${read("day")}`;
 }
 
-function validPeriod(start: string, end: string) {
-  return (
-    /^\d{4}-\d{2}-\d{2}$/.test(start) &&
-    /^\d{4}-\d{2}-\d{2}$/.test(end) &&
-    start <= end
-  );
-}
 function apiMessage(cause: unknown) {
   if (cause instanceof ApiClientError) {
     if (cause.code === "SYNC_IN_PROGRESS")
@@ -664,14 +752,16 @@ function Forbidden() {
   );
 }
 function EmptyRuns() {
+  // The step itself is the generate form right above; a second button here
+  // would only compete with it.
   return (
-    <section className="border border-border bg-surface p-6 text-center">
-      <h2 className="text-sm font-bold">Belum ada payroll</h2>
-      <p className="mt-1 text-xs text-muted">
-        Pilih periode yang sudah difinalisasi HRD di HRIS, tekan Tarik dari
-        HRIS, lalu Generate payroll.
-      </p>
-    </section>
+    <EmptyState
+      id="summary-empty-runs"
+      icon="payroll"
+      title="Belum ada payroll"
+      description="Pilih periode yang sudah difinalisasi HRD di HRIS, tekan Tarik dari HRIS, lalu Generate payroll."
+      backdrop={<SummaryEmptyBackdrop />}
+    />
   );
 }
 function ErrorHistory({ onRetry }: { onRetry: () => void }) {

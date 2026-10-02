@@ -1,4 +1,9 @@
-import type { AttendancePeriod, RateVersionOption } from "../api/summary-api";
+import type {
+  AttendancePeriod,
+  PayrollPeriod,
+  RateVersionOption,
+} from "../api/summary-api";
+import { periodBookLabel } from "../model/period-book";
 import {
   MACHINE_GROUPS,
   effectiveRangeLabel,
@@ -19,11 +24,16 @@ export type RatePickerState =
       onChange: (group: MachineGroup, rateVersionId: string) => void;
     };
 
+/** Keadaan daftar buku periode untuk pemilih di form. */
+export type PeriodBookState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string; onRetry: () => void }
+  | { kind: "ready"; books: PayrollPeriod[] };
+
 export function GeneratePayrollForm({
-  periodStart,
-  periodEnd,
-  onPeriodStartChange,
-  onPeriodEndChange,
+  books,
+  selectedBook,
+  onBookChange,
   attendance,
   attendanceLoading,
   canGenerate,
@@ -34,10 +44,9 @@ export function GeneratePayrollForm({
   onSync,
   rates,
 }: {
-  periodStart: string;
-  periodEnd: string;
-  onPeriodStartChange: (value: string) => void;
-  onPeriodEndChange: (value: string) => void;
+  books: PeriodBookState;
+  selectedBook: PayrollPeriod | null;
+  onBookChange: (bookId: string) => void;
   attendance: AttendancePeriod | undefined;
   attendanceLoading: boolean;
   canGenerate: boolean;
@@ -49,31 +58,18 @@ export function GeneratePayrollForm({
   rates: RatePickerState;
 }) {
   const ratesBlocking = rates.kind === "loading" || rates.kind === "error";
+  // Backend menolak generate di buku tertutup (PAYROLL_PERIOD_CLOSED).
+  const bookClosed = selectedBook?.status === "CLOSED";
   return (
     <section
       aria-label="Parameter generate payroll"
       className="flex flex-wrap items-end gap-2 border border-border bg-surface px-3 py-2"
     >
-      <label className="text-[0.6875rem] font-semibold">
-        Start date
-        <input
-          aria-label="Start date"
-          type="date"
-          className="mt-1 block min-h-8 border border-border-strong px-2 text-xs focus:outline-2 focus:outline-focus"
-          value={periodStart}
-          onChange={(event) => onPeriodStartChange(event.target.value)}
-        />
-      </label>
-      <label className="text-[0.6875rem] font-semibold">
-        End date
-        <input
-          aria-label="End date"
-          type="date"
-          className="mt-1 block min-h-8 border border-border-strong px-2 text-xs focus:outline-2 focus:outline-focus"
-          value={periodEnd}
-          onChange={(event) => onPeriodEndChange(event.target.value)}
-        />
-      </label>
+      <PeriodBookPicker
+        books={books}
+        selectedBook={selectedBook}
+        onChange={onBookChange}
+      />
       <div className="min-w-48 flex-1 pb-0.5 text-[0.6875rem]">
         <p className="font-semibold">Attendance HRIS</p>
         <p
@@ -90,7 +86,7 @@ export function GeneratePayrollForm({
         <button
           type="button"
           className="min-h-8 border border-border-strong px-3 text-xs font-semibold disabled:text-disabled"
-          disabled={syncing || periodStart > periodEnd}
+          disabled={syncing || !selectedBook}
           title="Ambil revision FINAL periode ini dari HRIS (menu Absensi → Summary Payroll)."
           onClick={onSync}
         >
@@ -108,8 +104,14 @@ export function GeneratePayrollForm({
           disabled={
             generating ||
             !attendance ||
-            periodStart > periodEnd ||
+            !selectedBook ||
+            bookClosed ||
             ratesBlocking
+          }
+          title={
+            bookClosed
+              ? "Buku periode ini sudah ditutup; payroll tidak bisa di-generate lagi."
+              : undefined
           }
           onClick={onGenerate}
         >
@@ -118,6 +120,80 @@ export function GeneratePayrollForm({
       ) : null}
       {canGenerate ? <RatePicker rates={rates} /> : null}
     </section>
+  );
+}
+
+function PeriodBookPicker({
+  books,
+  selectedBook,
+  onChange,
+}: {
+  books: PeriodBookState;
+  selectedBook: PayrollPeriod | null;
+  onChange: (bookId: string) => void;
+}) {
+  const list = books.kind === "ready" ? books.books : [];
+  return (
+    <div className="min-w-72 text-[0.6875rem]">
+      <label className="font-semibold" htmlFor="summary-period-book">
+        Buku periode
+      </label>
+      <div className="mt-1 flex items-center gap-2">
+        <select
+          id="summary-period-book"
+          className="block min-h-8 w-full min-w-0 border border-border-strong bg-surface px-2 text-xs focus:outline-2 focus:outline-focus disabled:text-disabled"
+          disabled={list.length === 0}
+          value={selectedBook?.id ?? ""}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          {list.length === 0 ? (
+            <option value="">
+              {books.kind === "loading"
+                ? "Memuat buku periode…"
+                : books.kind === "error"
+                  ? "Buku periode gagal dimuat"
+                  : "Belum ada buku periode"}
+            </option>
+          ) : null}
+          {list.map((book) => (
+            <option key={book.id} value={book.id}>
+              {periodBookLabel(book)}
+            </option>
+          ))}
+        </select>
+        {selectedBook ? (
+          <span
+            className={`shrink-0 rounded border px-1.5 py-0.5 text-[0.625rem] font-bold uppercase ${
+              selectedBook.status === "CLOSED"
+                ? "border-border-strong bg-surface-muted text-muted"
+                : "border-success-border bg-success-soft text-success-strong"
+            }`}
+          >
+            {selectedBook.status === "CLOSED" ? "Tutup" : "Terbuka"}
+          </span>
+        ) : null}
+      </div>
+      {books.kind === "error" ? (
+        <p className="mt-1 text-danger" role="alert">
+          {books.message}{" "}
+          <button
+            type="button"
+            className="font-semibold underline underline-offset-2"
+            onClick={books.onRetry}
+          >
+            Coba lagi
+          </button>
+        </p>
+      ) : books.kind === "ready" && list.length === 0 ? (
+        <p className="mt-1 text-warning-strong">
+          Buat buku periode di menu Manual Data terlebih dahulu.
+        </p>
+      ) : selectedBook?.status === "CLOSED" ? (
+        <p className="mt-1 text-muted">
+          Buku sudah ditutup; generate payroll dinonaktifkan.
+        </p>
+      ) : null}
+    </div>
   );
 }
 

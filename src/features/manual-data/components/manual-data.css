@@ -149,9 +149,17 @@
 }
 .manual-book-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.375rem;
+  gap: 0.25rem 0.375rem;
   min-height: 1.75rem;
+}
+.manual-book-head > label {
+  white-space: nowrap;
+}
+.manual-book > select {
+  width: 100%;
+  min-width: 0;
 }
 .manual-search {
   display: flex;
@@ -159,6 +167,10 @@
   gap: 0.1875rem;
   min-width: 0;
   margin: 0;
+}
+.manual-search > input {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .manual-period-badge {
   border-radius: 999px;
@@ -190,14 +202,30 @@
 */
 .manual-period-actions {
   display: flex;
-  gap: 0.1875rem;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
   margin-inline-start: auto;
+}
+/* Closing a book cannot be undone: a gap and a hairline keep it from reading
+   as the third of three routine buttons. */
+.manual-period-close {
+  position: relative;
+  margin-inline-start: 0.625rem;
+}
+.manual-period-close::before {
+  content: "";
+  position: absolute;
+  inset-block: 0.25rem;
+  inset-inline-start: calc(-0.375rem - 1px);
+  width: 1px;
+  background: var(--color-border);
 }
 .manual-period-actions .manual-btn,
 .manual-search .manual-btn {
   min-height: 1.75rem;
   padding: 0.125rem 0.5rem;
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
 }
 .manual-search .manual-btn {
   min-height: 2rem;
@@ -239,6 +267,12 @@
   padding: 0.375rem 0.5rem;
   border-bottom: 1px solid var(--color-border);
 }
+.manual-side-controls > .manual-workspace-heading {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--color-surface);
+}
 .manual-workspace-heading > h2 {
   grid-area: 1 / 1;
 }
@@ -248,10 +282,34 @@
 .manual-workspace-heading > p {
   grid-area: 2 / 1 / 3 / 3;
 }
+/* A dot for the draft state: grey when there is nothing to lose, amber when
+   leaving would lose work. */
+.manual-draft-state::before {
+  content: "";
+  display: inline-block;
+  width: 0.4375rem;
+  height: 0.4375rem;
+  margin-inline-end: 0.3125rem;
+  border-radius: 999px;
+  background: var(--color-border-strong);
+  vertical-align: 0.0625rem;
+}
+.manual-draft-dirty {
+  color: var(--color-warning-strong);
+  font-weight: 600;
+}
+.manual-draft-dirty::before {
+  background: var(--color-warning-strong);
+}
 .manual-page h2,
 .manual-page h3 {
   font-size: 0.875rem;
   font-weight: 700;
+}
+/* The column's one heading: a clear step above its 12px body. */
+.manual-workspace-heading > h2 {
+  font-size: 1rem;
+  letter-spacing: -0.01em;
 }
 .manual-workspace-heading p,
 .manual-hint,
@@ -262,7 +320,7 @@
 .manual-toolbar {
   display: grid;
   gap: 0.1875rem;
-  padding: 0.125rem 0.5rem;
+  padding: 0.25rem 0.5rem;
 }
 .manual-toolbar-group {
   display: flex;
@@ -270,11 +328,112 @@
   gap: 0.1875rem;
   flex-wrap: wrap;
 }
-.manual-toolbar .manual-btn {
-  padding: 0.125rem 0.3125rem;
-  min-height: 1.75rem;
+/*
+  A quiet name per row, so three rows of buttons read as three families. The
+  name sits in the gutter; buttons wrap under the first button, never under
+  the name, so a narrow column stays aligned instead of overflowing.
+*/
+.manual-side-controls .manual-toolbar-group {
+  position: relative;
+  min-height: 1.875rem;
+  padding-inline-start: 2.75rem;
+}
+.manual-toolbar-label {
+  color: var(--color-muted);
   font-size: 0.6875rem;
+  font-weight: 600;
+}
+.manual-side-controls .manual-toolbar-label {
+  position: absolute;
+  inset-inline-start: 0;
+  top: 0;
+  line-height: 1.875rem;
+}
+.manual-toolbar .manual-btn {
+  padding: 0.125rem 0.4375rem;
+  /* 30px: the dense ceiling this column has held to (see the desktop test). */
+  min-height: 1.875rem;
+  font-size: 0.75rem;
   line-height: 1.1;
+}
+.manual-toolbar-link {
+  padding-inline: 0.25rem;
+  color: var(--color-brand);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  white-space: nowrap;
+}
+.manual-toolbar-link:hover {
+  color: var(--color-brand-strong);
+}
+.manual-toolbar-note {
+  margin: 0;
+  padding-inline-start: 2.75rem;
+  color: var(--color-muted);
+  font-size: 0.6875rem;
+  line-height: 1.4;
+}
+/* Menu "Lainnya": in flow under its button, not floating, so the column's
+   own overflow never clips it. */
+.manual-menu {
+  position: relative;
+}
+.manual-menu-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.manual-menu-button[aria-expanded="true"] {
+  background: var(--color-surface-muted);
+}
+.manual-menu-list {
+  position: absolute;
+  inset-inline-end: 0;
+  top: calc(100% + 0.25rem);
+  z-index: 20;
+  display: grid;
+  min-width: 15rem;
+  padding: 0.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  background: var(--color-surface);
+  box-shadow:
+    0 10px 24px -8px rgb(23 32 29 / 0.22),
+    0 2px 4px rgb(23 32 29 / 0.06);
+}
+.manual-menu-item {
+  display: grid;
+  gap: 0.125rem;
+  border: 0;
+  border-radius: 0.25rem;
+  padding: 0.5rem 0.625rem;
+  background: none;
+  color: var(--color-foreground);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-align: start;
+  cursor: pointer;
+}
+.manual-menu-item:hover:not(:disabled),
+.manual-menu-item:focus-visible {
+  background: var(--color-surface-muted);
+  outline: none;
+}
+.manual-menu-item[data-tone="danger"] {
+  color: var(--color-danger);
+}
+.manual-menu-item:disabled {
+  color: var(--color-disabled);
+  cursor: not-allowed;
+}
+.manual-menu-item small {
+  color: var(--color-muted);
+  font-size: 0.6875rem;
+  font-weight: 400;
+  line-height: 1.35;
 }
 .manual-page .manual-checkbox {
   display: flex;
@@ -409,6 +568,178 @@
   width: 100%;
   height: 100%;
 }
+/*
+  Bottom of the right-hand column: paging, capacity, and adding empty rows.
+  `margin-block-start: auto` pins it down when no panel is open; with one
+  open, the panel's `flex: 1 1 auto` takes the space between and scrolls.
+*/
+.manual-side-footer {
+  flex: none;
+  display: grid;
+  gap: 0.5rem;
+  margin-block-start: auto;
+  padding: 0.625rem 0.5rem 0.75rem;
+  border-block-start: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  font-size: 0.75rem;
+}
+.manual-side-footer-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--color-muted);
+}
+.manual-side-footer-head {
+  font-size: 0.75rem;
+}
+.manual-pager {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 0.25rem;
+}
+.manual-pager .manual-page-size {
+  width: auto;
+  min-height: 2rem;
+}
+.manual-capacity {
+  display: grid;
+  gap: 0.25rem;
+}
+.manual-capacity-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+.manual-capacity-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+}
+/* The popover hangs off the whole capacity block, not the small (i): the
+   (i) sits mid-column, and anchoring there ran the popover off-screen. */
+.manual-capacity {
+  position: relative;
+}
+.manual-capacity-tip summary {
+  display: grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  list-style: none;
+  color: var(--color-muted);
+  font-size: 0.625rem;
+  font-style: italic;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.manual-capacity-tip summary::-webkit-details-marker {
+  display: none;
+}
+.manual-capacity-tip summary:hover,
+.manual-capacity-tip[open] summary {
+  border-color: var(--color-brand);
+  color: var(--color-brand-strong);
+}
+.manual-capacity-tip summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+/* Opens upward: the capacity line sits at the bottom of the screen. */
+.manual-capacity-tip-body {
+  position: absolute;
+  bottom: calc(100% + 0.5rem);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  display: grid;
+  gap: 0.375rem;
+  min-width: min(20rem, calc(100vw - 2rem));
+  padding: 0.625rem 0.75rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  background: var(--color-surface);
+  box-shadow: 0 12px 32px -16px rgb(15 23 42 / 0.35);
+  color: var(--color-foreground);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  font-variant-numeric: normal;
+}
+.manual-capacity-tip-body strong {
+  font-size: 0.8125rem;
+}
+.manual-capacity-tip-body p {
+  color: var(--color-muted);
+}
+.manual-capacity-tip-body ol {
+  display: grid;
+  gap: 0.3125rem;
+  padding-inline-start: 1.125rem;
+  list-style: decimal;
+}
+.manual-capacity-warning {
+  color: var(--color-warning-strong);
+  font-weight: 600;
+}
+.manual-capacity-meter {
+  width: 100%;
+  height: 0.375rem;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-border);
+  overflow: hidden;
+}
+.manual-capacity-meter::-webkit-meter-bar {
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-border);
+}
+.manual-capacity-meter::-webkit-meter-optimum-value,
+.manual-capacity-meter::-webkit-meter-suboptimum-value {
+  border-radius: 999px;
+  background: var(--color-brand);
+}
+.manual-capacity-meter::-moz-meter-bar {
+  border-radius: 999px;
+  background: var(--color-brand);
+}
+.manual-capacity-meter:-moz-meter-sub-optimum::-moz-meter-bar {
+  background: var(--color-warning-strong);
+}
+.manual-add-rows {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--color-muted);
+}
+.manual-add-rows .manual-btn {
+  flex: none;
+}
+.manual-add-rows > span {
+  white-space: nowrap;
+}
+.manual-add-rows input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 2rem;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 0.25rem;
+  background: var(--color-surface);
+  color: var(--color-foreground);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.manual-add-rows input:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 1px;
+}
 .manual-pagination {
   padding: 0.25rem 0.5rem;
   display: flex;
@@ -451,6 +782,98 @@
 
 .manual-status:empty {
   display: none;
+}
+/*
+  What blocks Simpan, right under the status line: the count, and ‹ › to walk
+  the rows one by one. Amber — work to do, not a failure that already happened.
+*/
+.manual-fix-strip {
+  display: grid;
+  gap: 0.375rem;
+  margin: 0;
+  border-block: 1px solid var(--color-warning-border);
+  padding: 0.5rem;
+  background: var(--color-warning-soft);
+  color: var(--color-warning-strong);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+.manual-fix-strip-count {
+  margin: 0;
+}
+.manual-fix-strip-nav {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr) 2rem;
+  gap: 0.25rem;
+}
+.manual-fix-strip-nav .manual-btn {
+  min-height: 2rem;
+  padding: 0;
+  border-color: var(--color-warning-border);
+  background: var(--color-surface);
+  color: var(--color-warning-strong);
+  font-size: 0.9375rem;
+}
+.manual-fix-strip-current {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  border: 1px solid var(--color-warning-border);
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  background: var(--color-surface);
+  color: var(--color-foreground);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.manual-fix-strip-current > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.manual-fix-strip-current:focus-visible,
+.manual-fix-strip-nav .manual-btn:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 1px;
+}
+.manual-fix-strip-pos {
+  flex: none;
+  color: var(--color-warning-strong);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+/*
+  Rows dated outside the open book: amber like their cells, a notice rather
+  than a failure — they may be right, only they will not land in this book.
+*/
+.manual-outside-book {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  border-block: 1px solid var(--color-warning-border);
+  padding: 0.5rem;
+  background: var(--color-warning-soft);
+  color: var(--color-warning-strong);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+.manual-outside-book button {
+  justify-self: start;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.manual-outside-book button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 /*
   A failed import used to look identical to "12 baris ditempel ke draft": same
@@ -584,7 +1007,8 @@
 }
 .manual-split-side > .manual-errors,
 .manual-split-side > .manual-directory,
-.manual-split-side > .manual-editor {
+.manual-split-side > .manual-editor,
+.manual-split-side > .manual-paste {
   border-inline: 0;
   border-block-start: 0;
   /* `flex: 1 1 auto` claims the height left over by the tab strip, and
@@ -592,7 +1016,9 @@
      content and scroll. Without the pair, the panel keeps its content height
      and spills out of the gutter. */
   flex: 1 1 auto;
-  min-height: 0;
+  /* Never squeezed below a readable few items by the controls above — but
+     low enough that a 768px-tall laptop still shows the toolbar. */
+  min-height: min(10rem, 35%);
   overflow: auto;
 }
 /*
@@ -602,14 +1028,29 @@
   whatever the panel holds.
 */
 .manual-side-controls {
-  flex: none;
+  /*
+    Keeps its content height while there is room. When an import piles a
+    status, the fix strip and a notice on top, it gives way — scrolling on
+    its own, with "Data produksi + Simpan" pinned — so the problem list under
+    it never shrinks to a single line.
+  */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   display: grid;
+  /* One track no wider than the column: an intrinsic-width child (a long
+     book name, a button row) must wrap, not widen every row with it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.25rem;
   padding-block-end: 0.25rem;
   border-block-end: 1px solid var(--color-border);
 }
 .manual-side-controls > .manual-page-controls {
   padding: 0.375rem 0.5rem 0;
+}
+.manual-side-controls > .manual-status {
+  padding: 0.5rem;
+  line-height: 1.45;
 }
 /* In the column the book and the search each take the full width. */
 .manual-side-controls .manual-filters {
@@ -689,9 +1130,25 @@
   .manual-split-tabs {
     border-block-start: 1px solid var(--color-border);
   }
+  /* Under the grid again, full width: one row of paging, capacity and
+     add-rows instead of a stacked column. */
+  .manual-side-footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1.25rem;
+    margin-block-start: 0;
+  }
+  .manual-side-footer-head {
+    justify-content: flex-start;
+  }
+  .manual-capacity {
+    flex: 1 1 12rem;
+  }
   .manual-split-side > .manual-errors,
   .manual-split-side > .manual-directory,
-  .manual-split-side > .manual-editor {
+  .manual-split-side > .manual-editor,
+  .manual-split-side > .manual-paste {
     /* `max-height` works here where it failed in the wide layout: this is the
        element's OWN overflow against its own content, not a flex child being
        asked to shrink inside a parent that had no height to shrink against.
@@ -790,27 +1247,60 @@
   font-variant-numeric: tabular-nums;
 }
 
-.manual-error-groups {
-  list-style: none;
-  margin: 0.5rem 0 0;
-  padding: 0;
-  display: grid;
-  gap: 0.5rem;
-}
-.manual-error-groups > li {
-  padding: 0.5rem 0.625rem;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
+.manual-split-side > .manual-errors {
+  padding: 0.5rem 0.5rem 0.75rem;
   background: var(--color-surface);
 }
-/* The cause, said once for the whole group instead of on every value. */
-.manual-error-cause {
+.manual-errors-title {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 0.5rem;
   margin: 0;
+}
+.manual-errors-title .manual-error-count {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+.manual-error-groups {
+  list-style: none;
+  margin: 0.375rem 0 0;
+  padding: 0;
+  display: grid;
+}
+.manual-error-groups > li {
+  padding-block: 0.625rem;
+  border-block-start: 1px solid var(--color-border);
+}
+/* Column first, count as a badge: the count never lands mid-sentence. */
+.manual-error-cause {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0;
   font-weight: 600;
+}
+.manual-error-field {
+  font-size: 0.8125rem;
+}
+.manual-error-cause .manual-error-count {
+  border-radius: 999px;
+  padding: 0 0.4375rem;
+  background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
+  color: color-mix(in srgb, var(--color-danger) 80%, black);
+  font-size: 0.6875rem;
+  line-height: 1.25rem;
+}
+.manual-error-message {
+  margin: 0.125rem 0 0;
+  color: var(--color-foreground);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+.manual-error-hint {
+  margin: 0.375rem 0 0;
+  padding: 0;
 }
 .manual-error-count {
   font-variant-numeric: tabular-nums;
@@ -933,7 +1423,8 @@
   flex: 0 0 auto;
   border: 0;
   background: none;
-  padding: 0;
+  /* Text-sized, but with a pointer-sized target. */
+  padding: 0.3125rem 0;
   font: inherit;
   color: var(--color-accent, #0b6b4f);
   text-decoration: underline;
@@ -953,8 +1444,14 @@
 .manual-group-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem 0.75rem;
-  margin: 0.5rem 0 0;
+  align-items: baseline;
+  gap: 0 0.75rem;
+  margin: 0.25rem 0 0;
+}
+.manual-group-context {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
 }
 .manual-editor,
 .manual-paste {
@@ -962,6 +1459,7 @@
   padding: 1rem;
 }
 .manual-editor > .manual-toolbar,
+.manual-paste > .manual-toolbar,
 .manual-directory .manual-toolbar {
   padding: 0 0 0.5rem;
 }
@@ -1194,4 +1692,772 @@
 /* Kotaknya sendiri tidak interaktif; fokus awal modal jatuh di sana. */
 .manual-import-progress:focus-visible {
   outline: none;
+}
+
+/*
+  Loading skeleton. It reuses the workspace's own two-column boxes
+  (`.manual-split`, `--manual-pane-height`), so when the grid arrives it takes
+  the skeleton's place without a single pixel moving.
+*/
+.manual-skeleton-grid {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: var(--manual-pane-height);
+  overflow: hidden;
+  border-block: 1px solid var(--color-border);
+}
+/* Rows fade out downwards: the eye reads "a sheet", not "a wall". */
+.manual-skeleton-table {
+  height: 100%;
+  mask-image: linear-gradient(to bottom, #000 45%, transparent 100%);
+}
+/* Same proportions as COLUMN_LAYOUT in univer-grid.tsx. */
+.manual-skeleton-row {
+  display: grid;
+  grid-template-columns: 55fr 150fr 150fr 70fr 180fr 85fr 85fr 95fr;
+  height: 2rem;
+  border-block-end: 1px solid
+    color-mix(in srgb, var(--color-border) 60%, transparent);
+}
+.manual-skeleton-head {
+  background: var(--color-grid-header, var(--color-surface-muted));
+}
+.manual-skeleton-cell {
+  display: flex;
+  align-items: center;
+  padding-inline: 0.5rem;
+  border-inline-end: 1px solid
+    color-mix(in srgb, var(--color-border) 60%, transparent);
+}
+.manual-skeleton-cell:first-child {
+  justify-content: center;
+}
+/* Bones share the app-wide shimmer (`.skeleton-bone`); only sizes live here. */
+.manual-skeleton-bar {
+  height: 0.5rem;
+}
+.manual-skeleton-box {
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 0.1875rem;
+}
+.manual-skeleton-side {
+  display: grid;
+  gap: 0.4375rem;
+  padding: 0.5rem;
+  border-block-start: 1px solid var(--color-border);
+}
+.manual-skeleton-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-block: 0.125rem;
+}
+.manual-skeleton-block {
+  width: 4.25rem;
+  height: 2rem;
+}
+.manual-skeleton-buttons {
+  display: flex;
+  gap: 0.1875rem;
+}
+.manual-skeleton-chip {
+  width: 3.5rem;
+  height: 1.75rem;
+}
+
+/* The one moving part that carries meaning: which step is running. */
+.manual-load-stage {
+  position: absolute;
+  inset-block-start: 38%;
+  inset-inline-start: 50%;
+  translate: -50% -50%;
+  display: grid;
+  justify-items: center;
+  gap: 0.5rem;
+  min-width: 15rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  padding: 0.875rem 1.25rem 0.75rem;
+  background: color-mix(in srgb, var(--color-surface) 92%, transparent);
+  box-shadow: 0 8px 24px -12px rgb(15 23 42 / 0.25);
+  backdrop-filter: blur(2px);
+  animation: manual-load-arrive 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.manual-load-label {
+  margin: 0;
+  color: var(--color-foreground);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.manual-load-count {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+.manual-load-steps {
+  display: grid;
+  grid-template-columns: repeat(4, 2.5rem);
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.manual-load-steps li {
+  position: relative;
+  height: 0.25rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-border);
+}
+.manual-load-steps li::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--color-brand);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 420ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.manual-load-steps li[data-state="done"]::after {
+  transform: scaleX(1);
+}
+/* The running step fills and refills: work in progress, not a fixed ratio. */
+.manual-load-steps li[data-state="active"]::after {
+  animation: manual-load-fill 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes manual-load-fill {
+  0% {
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+  55% {
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+  56% {
+    transform-origin: right;
+  }
+  100% {
+    transform: scaleX(0);
+    transform-origin: right;
+  }
+}
+@keyframes manual-load-arrive {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .manual-load-stage {
+    animation: none;
+  }
+  .manual-load-steps li[data-state="active"]::after {
+    animation: none;
+    transform: scaleX(0.5);
+  }
+}
+
+/*
+  Laptop and tablet, 701–1200px wide: no room for the right-hand column, so
+  its controls sit above the sheet. Stacked, they took 240px and pushed the
+  page past the window — the sheet then scrolled inside a page that scrolled
+  too. Here they pack into two rows (book · search · Simpan, then the row
+  actions · draft state · help), and the page is exactly one window tall:
+  the sheet takes every pixel left, and it is the only thing that scrolls.
+*/
+@media (min-width: 701px) and (max-width: 1200px) and (min-height: 560px) {
+  #main-content:has(> .manual-page) {
+    padding-block-end: 0;
+  }
+  .manual-split {
+    /* Window minus the app header (41px), main's top padding (4px) and the
+       workspace's two 1px borders. */
+    --manual-pane-height: calc(100vh - 2.9375rem);
+    --manual-pane-height: calc(100dvh - 2.9375rem);
+    height: var(--manual-pane-height);
+    overflow: hidden;
+  }
+  .manual-split-grid {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
+
+  /* Two rows of controls. */
+  .manual-side-controls {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.375rem 0.75rem;
+    padding: 0.375rem 0.5rem;
+  }
+  .manual-side-controls > * {
+    grid-column: 1 / -1;
+  }
+  .manual-side-controls > .manual-page-controls {
+    grid-row: 1;
+    grid-column: 1 / 3;
+    padding: 0;
+  }
+  .manual-workspace-heading {
+    display: contents;
+  }
+  /* The tab already names the page; the heading stays for screen readers. */
+  .manual-workspace-heading > h2 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .manual-workspace-heading > button {
+    grid-row: 1;
+    grid-column: 3;
+  }
+  .manual-side-controls > .manual-toolbar {
+    grid-row: 2;
+    grid-column: 1;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 0.625rem;
+    padding: 0;
+  }
+  .manual-toolbar-group {
+    flex-wrap: nowrap;
+  }
+  /* The template is linked from "Cara mengisi" and from the paste preview. */
+  .manual-toolbar .manual-template-links {
+    display: none;
+  }
+  /* The filled count is on the capacity meter below the sheet. */
+  .manual-draft-filled {
+    display: none;
+  }
+  .manual-workspace-heading > p {
+    grid-row: 2;
+    grid-column: 2;
+    min-width: 0;
+    overflow: hidden;
+    text-align: end;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Book, its state, search and the book actions in one line. */
+  .manual-side-controls .manual-filters {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.375rem;
+  }
+  .manual-side-controls .manual-book,
+  .manual-side-controls .manual-book-head {
+    display: contents;
+  }
+  .manual-side-controls .manual-book select {
+    flex: 1 1 15rem;
+    order: 3;
+    min-width: 11rem;
+    max-width: 22rem;
+  }
+  .manual-side-controls .manual-search {
+    flex: 1 1 12rem;
+    order: 4;
+    min-width: 9rem;
+  }
+  .manual-side-controls .manual-period-actions {
+    order: 5;
+    flex: none;
+  }
+  .manual-side-controls .manual-book-head > label {
+    white-space: nowrap;
+  }
+
+  /* "Cara mengisi" becomes a ? that opens over the sheet, not above it. */
+  .manual-side-controls > .manual-guide {
+    grid-row: 2;
+    grid-column: 3;
+    position: relative;
+    padding: 0;
+  }
+  .manual-guide summary {
+    display: grid;
+    place-items: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border: 1px solid var(--color-border-strong);
+    border-radius: 999px;
+    list-style: none;
+    color: var(--color-muted);
+    font-size: 0.8125rem;
+    font-weight: 700;
+  }
+  .manual-guide summary::-webkit-details-marker {
+    display: none;
+  }
+  .manual-guide summary::before {
+    content: "?";
+  }
+  .manual-guide[open] summary,
+  .manual-guide summary:hover {
+    border-color: var(--color-brand);
+    color: var(--color-brand-strong);
+  }
+  .manual-guide summary:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+  .manual-guide-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .manual-guide-body {
+    position: absolute;
+    top: calc(100% + 0.375rem);
+    right: 0;
+    z-index: 40;
+    width: min(30rem, calc(100vw - 2rem));
+    padding: 0.5rem 0.75rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.375rem;
+    background: var(--color-surface);
+    box-shadow: 0 12px 32px -16px rgb(15 23 42 / 0.35);
+  }
+
+  /* A panel opened under the sheet borrows from it, but never most of it. */
+  .manual-split-side > .manual-errors,
+  .manual-split-side > .manual-directory,
+  .manual-split-side > .manual-editor,
+  .manual-split-side > .manual-paste {
+    flex: 0 1 auto;
+    max-height: 42%;
+  }
+  .manual-side-footer {
+    padding: 0.375rem 0.5rem;
+  }
+
+  /*
+    The column-only additions, undone for the one-line strip. The row labels,
+    the "edit baris" note and the template link each cost width the second
+    row does not have; together they pushed Simpan and the fix strip past the
+    right edge. Labels and note stay for screen readers.
+  */
+  .manual-side-controls {
+    overflow: visible;
+  }
+  .manual-side-controls .manual-toolbar-group {
+    position: static;
+    min-height: 0;
+    padding-inline-start: 0;
+  }
+  .manual-side-controls .manual-toolbar-label,
+  .manual-toolbar-note {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .manual-toolbar-link {
+    display: none;
+  }
+  .manual-toolbar .manual-btn {
+    flex: none;
+    white-space: nowrap;
+  }
+  /* Content-sized under the sheet, and at most a third of the height: the
+     fix strip above already steps through the rows, so the sheet keeps the
+     space. */
+  .manual-split-side > .manual-errors,
+  .manual-split-side > .manual-directory,
+  .manual-split-side > .manual-editor,
+  .manual-split-side > .manual-paste {
+    min-height: 0;
+    max-height: 32%;
+  }
+  .manual-outside-book {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 0.75rem;
+    padding: 0.25rem 0.5rem;
+  }
+  /* The status and the fix strip as single lines, not blocks. */
+  .manual-side-controls > .manual-status {
+    padding: 0.3125rem 0.5rem;
+    line-height: 1.4;
+  }
+  .manual-fix-strip {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.25rem 0.75rem;
+    padding: 0.25rem 0.5rem;
+  }
+  .manual-fix-strip-nav {
+    grid-template-columns: 1.75rem minmax(0, 32rem) 1.75rem;
+  }
+  .manual-fix-strip-nav .manual-btn,
+  .manual-fix-strip-current {
+    min-height: 1.75rem;
+    height: 1.75rem;
+  }
+}
+
+/* Short laptop screens: the panel under the sheet gives up more height. */
+@media (min-width: 701px) and (max-width: 1200px) and (min-height: 560px) and (max-height: 760px) {
+  .manual-split-side > .manual-errors,
+  .manual-split-side > .manual-directory,
+  .manual-split-side > .manual-editor,
+  .manual-split-side > .manual-paste {
+    max-height: 24%;
+  }
+}
+
+/* Too narrow for the draft state beside the row actions: it moves up next
+   to Simpan, where the book and search still leave room. */
+@media (min-width: 701px) and (max-width: 900px) and (min-height: 560px) {
+  .manual-side-controls {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+  .manual-side-controls > .manual-page-controls {
+    grid-column: 1;
+  }
+  .manual-workspace-heading > p {
+    grid-row: 1;
+    grid-column: 2;
+    max-width: 12.5rem;
+  }
+  .manual-side-controls .manual-book select {
+    min-width: 8.5rem;
+  }
+  .manual-side-controls .manual-search {
+    min-width: 6.5rem;
+  }
+  /* One line when it fits; with Buat/Tutup buku as well it cannot, and a
+     second line beats clipping them. */
+  .manual-side-controls .manual-filters {
+    flex-wrap: nowrap;
+  }
+  .manual-side-controls .manual-filters:has(.manual-period-actions) {
+    flex-wrap: wrap;
+  }
+  .manual-side-controls > .manual-toolbar {
+    grid-column: 1 / 3;
+    flex-wrap: wrap;
+    row-gap: 0.25rem;
+  }
+}
+
+/*
+  One control height around the sheet: 28px, the height the toolbar buttons
+  already had. The book picker, search, Simpan and the paging strip were
+  32px each, and every one of those pixels came out of the sheet. Mouse and
+  trackpad only — touch keeps its 40px targets (`pointer: coarse` above).
+*/
+@media (pointer: fine) and (min-width: 701px) {
+  .manual-page .manual-side-controls select,
+  .manual-page .manual-side-controls input[type="search"],
+  .manual-page .manual-side-controls .manual-btn,
+  .manual-page .manual-side-footer select,
+  .manual-page .manual-side-footer input[type="number"],
+  .manual-page .manual-side-footer .manual-btn {
+    height: 1.75rem;
+    min-height: 1.75rem;
+    padding-block: 0;
+    white-space: nowrap;
+  }
+  .manual-page .manual-side-controls input[type="search"],
+  .manual-page .manual-side-footer input[type="number"] {
+    padding-inline: 0.5rem;
+  }
+  .manual-side-footer {
+    gap: 0.5rem;
+  }
+}
+@media (pointer: fine) and (min-width: 701px) and (max-width: 1200px) and (min-height: 560px) {
+  .manual-side-controls {
+    gap: 0.25rem 0.625rem;
+    padding-block: 0.3125rem;
+  }
+  .manual-guide summary {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+  .manual-side-footer {
+    padding-block: 0.3125rem;
+  }
+}
+
+/*
+  Simpan: steps, one bar, then the receipt.
+
+  The bar is the authored moment. While rows go out it fills to what the
+  batches have actually sent; when the server answers it splits into the
+  outcome — new, updated, unchanged, rejected — so the eye that followed the
+  progress lands on the result without looking for it.
+*/
+.manual-save {
+  display: grid;
+  gap: 0.375rem;
+  border-block: 1px solid var(--color-border);
+  padding: 0.5rem;
+  background: var(--color-surface-muted);
+  font-size: 0.75rem;
+}
+.manual-save[data-outcome="ok"] {
+  border-color: var(--color-success-border);
+  background: var(--color-success-soft);
+}
+.manual-save[data-outcome="partial"] {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-soft);
+}
+.manual-save-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--color-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+.manual-save-steps li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+}
+/* Drawn marks, not glyphs: a ring to come, a filled dot now, a tick done. */
+.manual-save-steps li::before {
+  content: "";
+  box-sizing: border-box;
+  width: 0.5rem;
+  height: 0.5rem;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.manual-save-steps li[data-state="active"] {
+  color: var(--color-foreground);
+}
+.manual-save-steps li[data-state="active"]::before {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 22%, transparent);
+}
+.manual-save-steps li[data-state="done"] {
+  color: var(--color-success-strong);
+}
+.manual-save-steps li[data-state="done"]::before {
+  width: 0.3125rem;
+  height: 0.5625rem;
+  margin-inline: 0.125rem 0.0625rem;
+  border-width: 0 1.5px 1.5px 0;
+  border-radius: 0;
+  transform: translateY(-0.0625rem) rotate(45deg);
+}
+.manual-save-bar {
+  display: flex;
+  gap: 2px;
+  height: 0.375rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-border) 70%, transparent);
+}
+.manual-save-fill {
+  border-radius: inherit;
+  background: var(--color-brand);
+  transform-origin: left;
+  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* Determinate: full width, scaled — a transform, so no layout per tick. */
+.manual-save-fill:not(.manual-save-indeterminate) {
+  flex: none;
+  width: 100%;
+}
+.manual-save-indeterminate {
+  width: 35%;
+  animation: manual-save-sweep 1.1s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+@keyframes manual-save-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(290%);
+  }
+}
+.manual-save-split {
+  background: transparent;
+}
+.manual-save-segment {
+  flex-basis: 0;
+  min-width: 0.375rem;
+  animation: manual-save-split 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.manual-save-segment:first-child {
+  border-start-start-radius: 999px;
+  border-end-start-radius: 999px;
+}
+.manual-save-segment:last-child {
+  border-start-end-radius: 999px;
+  border-end-end-radius: 999px;
+}
+@keyframes manual-save-split {
+  from {
+    flex-grow: 0;
+    opacity: 0.4;
+  }
+}
+.manual-save [data-kind="inserted"] {
+  --save-kind: var(--color-success);
+}
+.manual-save [data-kind="updated"] {
+  --save-kind: var(--color-brand);
+}
+.manual-save [data-kind="unchanged"] {
+  --save-kind: var(--color-border-strong);
+}
+.manual-save [data-kind="rejected"] {
+  --save-kind: var(--color-danger);
+}
+.manual-save-segment {
+  background: var(--save-kind);
+}
+.manual-save-message {
+  margin: 0;
+  color: var(--color-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.manual-save-headline {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.375rem;
+  margin: 0;
+  color: var(--color-foreground);
+  font-size: 0.8125rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.manual-save-headline svg {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.0625rem;
+  border-radius: 50%;
+  background: var(--color-success);
+  fill: none;
+  stroke: #fff;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.manual-save[data-outcome="partial"] .manual-save-headline svg {
+  background: var(--color-warning-strong);
+}
+.manual-save-time {
+  color: var(--color-muted);
+  font-weight: 500;
+}
+.manual-save-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.125rem 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--color-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.manual-save-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+}
+.manual-save-legend li::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 2px;
+  background: var(--save-kind);
+}
+.manual-save-legend li[data-zero] {
+  color: var(--color-muted);
+}
+.manual-save-legend li[data-zero]::before {
+  opacity: 0.35;
+}
+.manual-save-legend strong {
+  font-weight: 700;
+}
+.manual-save-jump {
+  justify-self: start;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: color-mix(in srgb, var(--color-danger) 75%, black);
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.manual-save-jump:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+/* The button says what it is doing, not just that it is off. */
+.manual-save-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+}
+.manual-save-button[aria-busy="true"]:disabled {
+  opacity: 1;
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+  color: #fff;
+  cursor: progress;
+}
+.manual-save-spinner {
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 2px solid color-mix(in srgb, #fff 35%, transparent);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: manual-save-spin 700ms linear infinite;
+}
+@keyframes manual-save-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.manual-draft-state.manual-draft-saved::before {
+  background: var(--color-success);
+}
+.manual-draft-saved {
+  color: var(--color-success-strong);
+}
+@media (prefers-reduced-motion: reduce) {
+  .manual-save-fill,
+  .manual-save-segment,
+  .manual-save-spinner {
+    animation: none;
+    transition: none;
+  }
+  .manual-save-indeterminate {
+    width: 100%;
+    opacity: 0.5;
+  }
 }

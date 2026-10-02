@@ -1,7 +1,12 @@
 import {
   DelimitedParser,
   detectDelimiter,
+  findImportHeader,
+  IMPORT_HEADER_SCAN_ROWS,
+  importRowProblem,
+  isBlankRow,
   mapImportHeader,
+  ROW_FIELD,
   toImportCells,
   validateRows,
   type BatchInput,
@@ -11,8 +16,8 @@ import {
 /**
  * Impor file besar tanpa melewati grid.
  *
- * Grid adalah permukaan edit, bukan alat angkut: kapasitasnya 10.000 baris
- * karena itu batas satu batch di kontrak. File yang lebih besar tidak punya
+ * Grid adalah permukaan edit, bukan alat angkut: kapasitasnya terbatas
+ * (`MAX_ROWS`) dan Simpan-nya menahan seluruh draft di memori. File yang lebih besar tidak punya
  * alasan lewat sana — dibaca sebagai stream, divalidasi per batch, lalu dikirim ke
  * `POST /production-entry-batches`. Memori yang dipakai sebesar satu batch,
  * bukan sebesar file, jadi file 200 ribu baris memakai memori yang sama dengan
@@ -51,6 +56,8 @@ export interface ImportProgress {
 export interface ImportSummary extends ImportProgress {
   headerDetected: boolean;
   unknownColumns: string[];
+  /** Baris tak kosong di atas baris judul yang dilewati. */
+  skippedBeforeHeader: number;
   delimiter: string;
   rejections: ImportRejection[];
   /** True kalau daftar penolakan dipotong karena terlalu panjang. */
@@ -61,7 +68,15 @@ export interface ImportOptions {
   /** Potongan teks berurutan dari file. */
   chunks: AsyncIterable<string>;
   send: (rows: BatchInput[], key: string) => Promise<BatchResult>;
-  newKey: () => string;
+  /**
+   * Satu kunci per percobaan impor. Kunci tiap batch DITURUNKAN darinya
+   * (`<importKey>-<n>`), jadi mengulang impor yang sama setelah gagal di
+   * tengah memutar ulang batch yang sudah tersimpan alih-alih menulisnya dua
+   * kali. Ulang dengan kunci yang sama hanya untuk file yang sama persis.
+   */
+  importKey?: string;
+  /** Dipakai hanya bila `importKey` tidak diberikan: kunci acak per batch. */
+  newKey?: () => string;
   onProgress?: (progress: ImportProgress) => void;
   signal?: AbortSignal;
   batchSize?: number;
@@ -118,12 +133,23 @@ export async function importProductionStream(
   };
 
   const seenKeys = new Set<string>();
+  /** Nomor batch yang sudah dibentuk, termasuk yang tidak berisi baris terkirim. */
+  let batchIndex = 0;
+  const batchKey = () => {
+    const index = batchIndex++;
+    return options.importKey
+      ? `${options.importKey}-${index}`
+      : (options.newKey?.() ?? crypto.randomUUID());
+  };
   let header: ImportHeader | null = null;
+  /** Baris tak kosong yang ditahan sampai baris judul bisa diputuskan. */
+  let scanned: { raw: string[]; row: number }[] = [];
+  let skippedBeforeHeader = 0;
   let delimiter = "";
   let parser: DelimitedParser | null = null;
   let leading = "";
   let fileRow = 0;
-  let pending: { cells: string[]; row: number }[] = [];
+  let pending: { cells: string[]; row: number; problem: string | null }[] = [];
 
   const flush = async (force: boolean) => {
     while (pending.length >= (force ? 1 : batchSize)) {
@@ -138,28 +164,51 @@ export async function importProductionStream(
       }));
       const rowNumbers = new Map(drafts.map((d, i) => [d.key, slice[i]!.row]));
 
-      const { rows, errors } = validateRows(drafts, new Map(), seenKeys);
+      // Baris yang sudah bermasalah sebelum validasi (kolom lebih) tidak ikut
+      // divalidasi: kuncinya tidak boleh memesan tempat di `seenKeys`.
+      const checked = drafts.filter((_, index) => !slice[index]!.problem);
+      const { rows, errors } = validateRows(checked, new Map(), seenKeys, {
+        reserve: "passing",
+      });
 
       // `validateRows` tetap mengembalikan baris yang punya error supaya grid
       // bisa menampilkannya berdampingan. Impor tidak boleh mengirimnya: satu
       // baris duplikat yang lolos akan menimpa produksi yang sudah benar.
       const failed = new Set(
-        errors.map((error) => drafts[error.row - 1]?.key).filter(Boolean),
+        errors.map((error) => checked[error.row - 1]?.key),
       );
       const sendable = rows.filter((row) => !failed.has(row.clientRowId));
 
-      for (const error of errors) {
-        progress.rejected += 1;
+      // Satu baris dengan tiga sel salah tetap SATU baris ditolak: hitungannya
+      // dibandingkan dengan "baris dibaca", bukan dengan jumlah pesan.
+      const rejectedRows = new Set<number>();
+      for (const item of slice) {
+        if (!item.problem) continue;
+        rejectedRows.add(item.row);
         keepRejection({
-          row: slice[error.row - 1]?.row ?? error.row,
+          row: item.row,
+          field: ROW_FIELD,
+          value: "",
+          message: item.problem,
+        });
+      }
+      for (const error of errors) {
+        const row = rowNumbers.get(checked[error.row - 1]?.key ?? "") ?? 0;
+        rejectedRows.add(row);
+        keepRejection({
+          row,
           field: error.field,
           value: error.value,
           message: error.message,
         });
       }
+      progress.rejected += rejectedRows.size;
 
+      // Dibentuk untuk setiap batch, terkirim atau tidak, supaya nomor batch
+      // — dan karena itu kuncinya — sama di setiap ulangan file yang sama.
+      const key = batchKey();
       if (sendable.length) {
-        const result = await options.send(sendable, options.newKey());
+        const result = await options.send(sendable, key);
 
         progress.batches += 1;
         progress.rowsSent += sendable.length;
@@ -185,21 +234,46 @@ export async function importProductionStream(
     }
   };
 
-  const take = async (rows: string[][]) => {
+  const enqueue = (shape: ImportHeader, raw: string[], row: number) => {
+    progress.rowsRead += 1;
+    pending.push({
+      cells: toImportCells(raw, shape),
+      row,
+      problem: importRowProblem(raw, shape),
+    });
+  };
+
+  /**
+   * Baris judul diputuskan setelah `IMPORT_HEADER_SCAN_ROWS` baris tak kosong
+   * terkumpul (atau file habis) — aturan yang sama dengan `parseImportFile`,
+   * jadi file yang sama terbaca sama lewat grid maupun lewat stream.
+   */
+  const resolveHeader = () => {
+    const at = findImportHeader(scanned.map((item) => item.raw));
+    const shape = mapImportHeader(
+      at >= 0 ? scanned[at]!.raw : (scanned[0]?.raw ?? []),
+    );
+    header = shape;
+    skippedBeforeHeader = Math.max(0, at);
+    for (const item of scanned.slice(at + 1))
+      enqueue(shape, item.raw, item.row);
+    scanned = [];
+  };
+
+  const take = async (rows: string[][], last = false) => {
     for (const raw of rows) {
       fileRow += 1;
+      if (isBlankRow(raw)) continue;
 
       if (!header) {
-        header = mapImportHeader(raw);
-        if (header.headerDetected) continue;
+        scanned.push({ raw, row: fileRow });
+        if (scanned.length >= IMPORT_HEADER_SCAN_ROWS) resolveHeader();
+        continue;
       }
 
-      const shape: ImportHeader = header;
-      if (raw.every((cell) => cell.trim() === "")) continue;
-
-      progress.rowsRead += 1;
-      pending.push({ cells: toImportCells(raw, shape, fileRow), row: fileRow });
+      enqueue(header, raw, fileRow);
     }
+    if (last && !header && scanned.length) resolveHeader();
 
     await flush(false);
   };
@@ -208,10 +282,11 @@ export async function importProductionStream(
     if (options.signal?.aborted) throw new ImportAborted();
 
     if (!parser) {
-      // Pemisah ditentukan dari baris pertama, jadi potongan awal ditahan
-      // sampai ada newline — file satu baris pun tetap terbaca lewat `finish`.
+      // Pemisah ditentukan dari baris pertama yang punya pemisah, jadi
+      // potongan awal ditahan sampai baris itu lengkap — file satu baris pun
+      // tetap terbaca lewat `finish`.
       leading += chunk.replace(/^\uFEFF/, "");
-      if (!leading.includes("\n") && !leading.includes("\r")) continue;
+      if (!readyToDetect(leading)) continue;
 
       delimiter = detectDelimiter(leading);
       parser = new DelimitedParser(delimiter);
@@ -230,7 +305,7 @@ export async function importProductionStream(
     await take(parser.push(leading));
   }
 
-  await take(parser.finish());
+  await take(parser.finish(), true);
   await flush(true);
 
   if (!progress.rowsRead)
@@ -244,10 +319,25 @@ export async function importProductionStream(
     ...progress,
     headerDetected: shape?.headerDetected ?? false,
     unknownColumns: shape?.unknownColumns ?? [],
+    skippedBeforeHeader,
     delimiter,
     rejections,
     rejectionsTruncated,
   };
+}
+
+/**
+ * Cukup teks untuk memilih pemisah seperti `detectDelimiter` pada file utuh:
+ * satu baris lengkap yang berisi pemisah, atau sudah sebanyak baris yang
+ * dipindainya. Judul laporan di baris pertama tidak berisi pemisah apa pun.
+ */
+function readyToDetect(text: string) {
+  if (text.length > 1024 * 1024) return true;
+  const complete = text.split(/\r\n|\n|\r/).slice(0, -1);
+  return (
+    complete.length >= IMPORT_HEADER_SCAN_ROWS ||
+    complete.some((line) => /[\t;,]/.test(line))
+  );
 }
 
 /** Potongan teks dari `File`, tanpa pernah menahan seluruh isinya di memori. */

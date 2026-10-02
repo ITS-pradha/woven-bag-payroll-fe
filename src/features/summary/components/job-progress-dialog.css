@@ -1,0 +1,448 @@
+.job-progress {
+  --sync-accent: var(--color-brand);
+  --sync-accent-soft: color-mix(in oklab, var(--color-brand) 12%, white);
+  /* Tahap yang sudah lewat tetap hijau, juga saat tahap berikutnya gagal. */
+  --sync-done: var(--color-brand);
+  position: fixed;
+  inset: 0;
+  width: min(46rem, calc(100% - 1.5rem));
+  max-height: calc(100% - 1.5rem);
+  margin: auto;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  background: var(--color-surface);
+  color: var(--color-foreground);
+  padding: 1rem 1.125rem 0.875rem;
+  box-shadow:
+    0 18px 48px -12px rgb(23 32 29 / 0.28),
+    0 2px 6px rgb(23 32 29 / 0.08);
+}
+.job-progress[open] {
+  display: grid;
+  gap: 1rem;
+  animation: job-progress-arrive 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.job-progress::backdrop {
+  background: rgb(23 32 29 / 0.38);
+  backdrop-filter: blur(2px);
+  animation: job-progress-fade 240ms ease-out;
+}
+.job-progress:focus-visible {
+  outline: none;
+}
+.job-progress[data-tone="done"] {
+  --sync-accent: var(--color-success);
+  --sync-accent-soft: var(--color-success-soft);
+  --sync-done: var(--color-success);
+  border-color: var(--color-success-border);
+}
+.job-progress[data-tone="failed"] {
+  --sync-accent: var(--color-danger);
+  --sync-accent-soft: color-mix(in oklab, var(--color-danger) 9%, white);
+  border-color: color-mix(in oklab, var(--color-danger) 35%, white);
+}
+
+/* ---------- header ---------- */
+.job-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+.job-progress-emblem {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  background: var(--sync-accent-soft);
+  color: var(--sync-accent);
+}
+.job-progress[data-tone="running"] .job-progress-emblem svg {
+  animation: job-progress-spin 1.6s linear infinite;
+}
+.job-progress-title {
+  min-width: 0;
+  flex: 1;
+}
+.job-progress-title h2 {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+.job-progress-title p {
+  margin-top: 0.0625rem;
+  font-size: 0.6875rem;
+  color: var(--color-muted);
+}
+.job-progress-clock {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.3125rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0.1875rem 0.5rem 0.1875rem 0.375rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-muted);
+}
+.job-progress-clock svg {
+  width: 0.8125rem;
+  height: 0.8125rem;
+}
+.job-progress-close {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.25rem;
+  color: var(--color-muted);
+}
+.job-progress-close:hover {
+  background: var(--color-surface-muted);
+  color: var(--color-foreground);
+}
+.job-progress-close:focus-visible,
+.job-progress-btn:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* ---------- track ---------- */
+.job-progress-track {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.job-progress-track li {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 0.25rem;
+  padding-inline: 0.375rem;
+  text-align: center;
+}
+
+/* Rel menghubungkan titik sebelumnya ke titik ini. */
+.job-progress-rail {
+  position: absolute;
+  top: 0.75rem;
+  right: calc(50% + 0.875rem);
+  left: calc(-50% + 0.875rem);
+  height: 2px;
+  border-radius: 999px;
+  background: var(--color-border);
+  overflow: hidden;
+}
+.job-progress-track li:first-child .job-progress-rail {
+  display: none;
+}
+.job-progress-track li[data-state="done"] .job-progress-rail {
+  background: var(--sync-done);
+}
+.job-progress-track li[data-state="failed"] .job-progress-rail {
+  background: color-mix(in oklab, var(--color-danger) 45%, white);
+}
+/* Rel menuju tahap aktif: paket data mengalir ke arah tujuan. */
+.job-progress-track li[data-state="active"] .job-progress-rail {
+  background:
+    repeating-linear-gradient(
+        90deg,
+        var(--sync-accent) 0 0.375rem,
+        transparent 0.375rem 0.75rem
+      )
+      0 0 / 0.75rem 100%,
+    var(--sync-accent-soft);
+  animation: job-progress-flow 0.7s linear infinite;
+}
+
+.job-progress-node {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-disabled);
+  transition:
+    background-color 240ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 240ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.job-progress-node svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+.job-progress-dot {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 999px;
+  background: currentColor;
+}
+.job-progress-track li[data-state="done"] .job-progress-node {
+  border-color: var(--sync-done);
+  background: var(--sync-done);
+  color: white;
+  animation: job-progress-pop 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.job-progress-track li[data-state="active"] .job-progress-node {
+  border-color: var(--sync-accent);
+  color: var(--sync-accent);
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--sync-accent) 35%, transparent);
+  animation: job-progress-pulse 1.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+.job-progress-track li[data-state="failed"] .job-progress-node {
+  border-color: var(--color-danger);
+  background: var(--color-danger);
+  color: white;
+}
+
+.job-progress-step-label {
+  margin-top: 0.125rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--color-muted);
+}
+.job-progress-step-hint {
+  max-width: 22ch;
+  font-size: 0.6875rem;
+  line-height: 1.35;
+  color: var(--color-disabled);
+  text-wrap: pretty;
+}
+.job-progress-track li[data-state="done"] .job-progress-step-label,
+.job-progress-track li[data-state="active"] .job-progress-step-label {
+  color: var(--color-foreground);
+}
+.job-progress-track li[data-state="active"] .job-progress-step-hint {
+  color: var(--color-muted);
+}
+.job-progress-track li[data-state="failed"] .job-progress-step-label {
+  color: var(--color-danger);
+}
+
+/* ---------- hasil ---------- */
+.job-progress-result {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  margin: 0;
+  border: 1px solid var(--color-success-border);
+  border-radius: 0.25rem;
+  background: var(--color-success-soft);
+  animation: job-progress-arrive 360ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.job-progress-result > div {
+  display: grid;
+  gap: 0.125rem;
+  padding: 0.5rem 0.75rem;
+}
+.job-progress-result > div + div {
+  border-left: 1px solid var(--color-success-border);
+}
+.job-progress-result dt {
+  font-size: 0.6875rem;
+  color: var(--color-success-strong);
+}
+.job-progress-result dd {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-foreground);
+}
+.job-progress-result > div[data-attention] dt,
+.job-progress-result > div[data-attention] dd {
+  color: var(--color-warning-strong);
+}
+.job-progress-result > div[data-attention] {
+  background: var(--color-warning-soft);
+}
+
+/* ---------- foot ---------- */
+.job-progress-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.5rem;
+}
+.job-progress-foot p {
+  min-width: 0;
+  flex: 1;
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  color: var(--color-muted);
+}
+.job-progress[data-tone="failed"] .job-progress-foot p {
+  color: var(--color-danger);
+}
+.job-progress[data-tone="done"] .job-progress-foot p {
+  color: var(--color-success-strong);
+}
+.job-progress-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 2rem;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 0.25rem;
+  background: var(--color-surface);
+  padding-inline: 0.875rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.job-progress-btn:hover {
+  background: var(--color-surface-muted);
+}
+.job-progress-btn-primary {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+  color: white;
+}
+.job-progress-btn-primary:hover {
+  border-color: var(--color-brand-strong);
+  background: var(--color-brand-strong);
+}
+.job-progress-btn svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+/* ---------- layar sempit: jalur vertikal ---------- */
+@media (max-width: 40rem) {
+  .job-progress-track {
+    grid-template-columns: 1fr;
+    gap: 0.625rem;
+  }
+  .job-progress-track li {
+    grid-template-columns: 1.5rem minmax(0, 1fr);
+    justify-items: start;
+    column-gap: 0.625rem;
+    row-gap: 0;
+    padding-inline: 0;
+    text-align: left;
+  }
+  .job-progress-node {
+    grid-row: span 2;
+  }
+  .job-progress-step-label {
+    margin-top: 0.0625rem;
+  }
+  .job-progress-step-hint {
+    max-width: none;
+  }
+  .job-progress-result {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .job-progress-result > div + div {
+    border-left: 0;
+  }
+  .job-progress-result > div:nth-child(even) {
+    border-left: 1px solid var(--color-success-border);
+  }
+  .job-progress-result > div:nth-child(n + 3) {
+    border-top: 1px solid var(--color-success-border);
+  }
+  /*
+    Tinggi tiap tahap berbeda, jadi di sini rel menjulur KE BAWAH menuju tahap
+    berikutnya, dan warnanya mengikuti keadaan tahap tujuan itu.
+  */
+  .job-progress-track li[data-state] .job-progress-rail {
+    display: block;
+    top: 1.625rem;
+    bottom: -0.5rem;
+    left: calc(0.75rem - 1px);
+    right: auto;
+    width: 2px;
+    height: auto;
+    background: var(--color-border);
+    animation: none;
+  }
+  .job-progress-track li:last-child .job-progress-rail {
+    display: none;
+  }
+  .job-progress-track li:has(+ li[data-state="done"]) .job-progress-rail {
+    background: var(--sync-done);
+  }
+  .job-progress-track li:has(+ li[data-state="failed"]) .job-progress-rail {
+    background: color-mix(in oklab, var(--color-danger) 45%, white);
+  }
+  .job-progress-track li:has(+ li[data-state="active"]) .job-progress-rail {
+    background:
+      repeating-linear-gradient(
+          180deg,
+          var(--sync-accent) 0 0.375rem,
+          transparent 0.375rem 0.75rem
+        )
+        0 0 / 100% 0.75rem,
+      var(--sync-accent-soft);
+    animation: job-progress-flow-down 0.7s linear infinite;
+  }
+}
+
+@keyframes job-progress-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+@keyframes job-progress-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes job-progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes job-progress-flow {
+  to {
+    background-position:
+      0.75rem 0,
+      0 0;
+  }
+}
+@keyframes job-progress-flow-down {
+  to {
+    background-position:
+      0 0.75rem,
+      0 0;
+  }
+}
+@keyframes job-progress-pulse {
+  70% {
+    box-shadow: 0 0 0 0.4375rem transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@keyframes job-progress-pop {
+  from {
+    transform: scale(0.7);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-progress,
+  .job-progress::backdrop,
+  .job-progress *,
+  .job-progress *::before {
+    animation: none !important;
+  }
+}

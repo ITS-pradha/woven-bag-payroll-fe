@@ -1,16 +1,19 @@
 import { http, HttpResponse } from "msw";
 import type { components } from "../../../api/generated/schema";
+import { env } from "../../../config/env";
 
 type PayrollRun = components["schemas"]["PayrollRun"];
 type PayrollSummary = components["schemas"]["PayrollSummary"];
 
-const period: components["schemas"]["PayrollPeriod"] = {
+let period: components["schemas"]["PayrollPeriod"] = {
   id: "40000000-0000-4000-8000-000000000001",
-  code: "LOOM-2026-09",
+  code: `${env.VITE_PRODUCTION_DEPARTMENT_CODE}-2026-09`,
   periodStart: "2026-08-24",
   periodEnd: "2026-09-23",
-  departmentCode: "LOOM",
+  // Buku periode memakai departemen produksi, bukan departemen HRIS.
+  departmentCode: env.VITE_PRODUCTION_DEPARTMENT_CODE,
   status: "OPEN",
+  rowVersion: 1,
   createdAt: "2026-08-24T07:00:00+07:00",
   closedAt: null,
 };
@@ -191,6 +194,34 @@ export const summaryHandlers = [
     if (!validMutation(request))
       return fail(403, "MUTATION_FORBIDDEN", "Header mutasi demo tidak valid.");
     return HttpResponse.json(period, { status: 201 });
+  }),
+  http.patch("*/payroll-periods/:id", async ({ request, params }) => {
+    if (!validMutation(request))
+      return fail(403, "MUTATION_FORBIDDEN", "Header mutasi demo tidak valid.");
+    if (params.id !== period.id)
+      return fail(404, "NOT_FOUND", "Buku periode tidak ditemukan.");
+    const body =
+      (await request.json()) as components["schemas"]["UpdatePayrollPeriodRequest"];
+    if (body.expectedRowVersion !== period.rowVersion)
+      return HttpResponse.json(
+        {
+          error: {
+            code: "ROW_VERSION_CONFLICT",
+            message: "Row was modified by another user",
+            details: { currentRowVersion: period.rowVersion },
+            requestId: "mock",
+          },
+        },
+        { status: 409 },
+      );
+    period = {
+      ...period,
+      code: body.code,
+      periodStart: body.periodStart,
+      periodEnd: body.periodEnd,
+      rowVersion: period.rowVersion + 1,
+    };
+    return HttpResponse.json(period);
   }),
   http.get("*/attendance-periods", ({ request }) => {
     const query = new URL(request.url).searchParams;

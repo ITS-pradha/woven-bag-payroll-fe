@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   isAmbiguousDecimal,
+  MAX_ROWS,
+  serverFieldColumn,
   normalizeDecimalInput,
   normalizeDateInput,
   parseImportFile,
@@ -10,6 +12,8 @@ import {
   rowsWithValue,
   validateRows,
   toJakartaInput,
+  uniqueKeyOf,
+  DUPLICATE_KEY_MESSAGE,
 } from "./rows";
 
 const cells = [
@@ -101,14 +105,16 @@ describe("draft Manual Data", () => {
     ]);
     expect(() => parseClipboard("a\tb\nc")).toThrow();
     expect(() => parseClipboard("a\tb\tc\td\te\tf\tg\th")).toThrow();
-    // Batas tempel sekarang 10.000 baris, bukan kapasitas grid: di atas itu
-    // Impor file yang dipakai.
+    // Batas tempel = kapasitas grid (`MAX_ROWS`, kini 100.000 — Simpan
+    // dipecah per batch); di atas itu Impor file yang dipakai.
     expect(
       parseClipboard(Array.from({ length: 501 }, () => "1").join("\n")),
     ).toHaveLength(501);
     expect(() =>
-      parseClipboard(Array.from({ length: 10_001 }, () => "1").join("\n")),
-    ).toThrow(/10.000 baris/);
+      parseClipboard(
+        Array.from({ length: MAX_ROWS + 1 }, () => "1").join("\n"),
+      ),
+    ).toThrow(new RegExp(`${MAX_ROWS.toLocaleString("id-ID")} baris`));
   });
   it("rowsWithValue membaca isi sel sekarang, bukan nomor baris yang diingat", () => {
     const draft = (assignee: string) => ({
@@ -386,8 +392,24 @@ describe("impor file Manual Data", () => {
     expect(result.cells[0]?.[3]).toBe("8954");
   });
 
-  it("menolak file tanpa header yang kolomnya kelebihan", () => {
-    expect(() => parseImportFile(`${row},kolom-asing`)).toThrow(/7 kolom/);
+  it("kolom lebih tanpa header: ditolak per baris, ujung kosong diabaikan", () => {
+    const result = parseImportFile(
+      `${row},kolom-asing\n${row.replace("51", "52")},,`,
+    );
+    expect(result.cells).toHaveLength(2);
+    expect(result.problems).toEqual([
+      { index: 0, message: expect.stringMatching(/7 kolom/) },
+    ]);
+  });
+
+  it("mencari baris judul di bawah judul laporan dan memakai nomor baris file", () => {
+    const result = parseImportFile(
+      `Laporan produksi September\n\n${header}\n${row}\n\n${row.replace("51", "52")}`,
+    );
+    expect(result.headerDetected).toBe(true);
+    expect(result.skippedBeforeHeader).toBe(1);
+    expect(result.fileRows).toEqual([4, 6]);
+    expect(result.cells[1]?.[2]).toBe("52");
   });
 
   it("melaporkan kolom asing tanpa membatalkan impor", () => {
@@ -437,5 +459,175 @@ describe("impor file Manual Data", () => {
     const { cells } = parseImportFile(`${header}\n${row}`);
 
     expect(parseClipboard(toClipboardText(cells))).toEqual(cells);
+  });
+});
+
+describe("batas nilai dan desimal ambigu", () => {
+  const draft = (overrides: Partial<Record<number, string>>) => ({
+    key: "r1",
+    cells: cells.map((value, index) => overrides[index] ?? value),
+  });
+  const messages = (overrides: Partial<Record<number, string>>) =>
+    validateRows([draft(overrides)], new Map()).errors.map(
+      (error) => `${error.field}: ${error.message}`,
+    );
+
+  it("titik ribuan '1.902' di Result ambigu, di Weft tidak", () => {
+    expect(isAmbiguousDecimal("1.902", 6)).toBe(true);
+    expect(isAmbiguousDecimal("10.000", 5)).toBe(false);
+    expect(messages({ 6: "1.902" })).toEqual([
+      expect.stringMatching(/^Result \[m\]: "1.902" bisa berarti 1902/),
+    ]);
+    expect(messages({ 5: "10.000" })).toEqual([]);
+    // Lebih dari satu grup hanya bisa titik ribuan.
+    expect(normalizeDecimalInput("1.902.400")).toBe("1902400");
+  });
+
+  it("nilai yang dikembalikan server tidak pernah ditolak ulang", () => {
+    const original = {
+      id: "e1",
+      shiftStart: "2026-09-04T07:00:00+07:00",
+      shiftEnd: "2026-09-04T15:00:00+07:00",
+      stationNo: 51,
+      pin: "8954",
+      widthCm: "56.00",
+      weftDensity: "10.000",
+      resultMeter: "850.000",
+      sourceType: "MANUAL" as const,
+      status: "ACTIVE" as const,
+      rowVersion: 3,
+    };
+    const result = validateRows(
+      [
+        {
+          key: "r1",
+          cells: [...cells.slice(0, 4), "56.00", "10.000", "850.000"],
+          original,
+        },
+      ],
+      new Map(),
+    );
+    expect(result.errors).toEqual([]);
+  });
+
+  it("batas kolom mengikuti DDL", () => {
+    expect(messages({ 4: "500" })).toEqual([]);
+    expect(messages({ 4: "500.01" })).toEqual([
+      expect.stringMatching(/^Width \[cm\]: Maksimal 500/),
+    ]);
+    expect(messages({ 4: "56.125" })).toEqual([
+      expect.stringMatching(/2 angka di belakang titik/),
+    ]);
+    expect(messages({ 5: "100.5" })).toEqual([
+      expect.stringMatching(/^Weft \[s\/in\]: Maksimal 100/),
+    ]);
+    expect(messages({ 5: "10.1234" })).toEqual([
+      expect.stringMatching(/3 angka/),
+    ]);
+    expect(messages({ 6: "123456789012" })).toEqual([
+      expect.stringMatching(/11 digit/),
+    ]);
+    expect(messages({ 6: "12345678901.5" })).toEqual([]);
+    // Nol di ujung melewati skala tidak mengubah nilai, dan dikirim rapi.
+    const trimmed = validateRows([draft({ 6: "1.9020" })], new Map());
+    expect(trimmed.errors).toEqual([]);
+    expect(trimmed.rows[0]?.resultMeter).toBe("1.902");
+    expect(messages({ 1: "2026-09-04 07:00" })).toEqual([
+      expect.stringMatching(/^Shift End: Shift end harus setelah/),
+    ]);
+  });
+
+  it("kunci duplikat hanya dipesan oleh baris dengan kunci yang terbaca", () => {
+    const bad = { key: "a", cells: ["x", "y", ...cells.slice(2)] };
+    const badToo = { key: "b", cells: ["x", "y", ...cells.slice(2)] };
+    const fields = validateRows([bad, badToo], new Map()).errors.map(
+      (error) => error.field,
+    );
+    expect(fields).not.toContain("Station");
+  });
+
+  it("impor: baris gagal tidak memesan kunci untuk baris benar sesudahnya", () => {
+    const failing = draft({ 3: "" });
+    const passing = { ...draft({}), key: "r2" };
+    const seen = new Set<string>();
+    const result = validateRows([failing, passing], new Map(), seen, {
+      reserve: "passing",
+    });
+    expect(result.errors.map((error) => error.row)).toEqual([1]);
+    expect(seen.size).toBe(1);
+  });
+
+  it("field server tanpa kolom menunjuk sel yang tepat", () => {
+    expect(serverFieldColumn("uniqueKey")).toBe("Shift Start");
+    expect(serverFieldColumn("expectedRowVersion")).toBe("Baris");
+    expect(serverFieldColumn("clientRowId")).toBe("Baris");
+    expect(serverFieldColumn("widthCm")).toBe("Width [cm]");
+  });
+});
+
+describe("validasi per potongan", () => {
+  const row = (start: string, station: string, width = "56") => ({
+    key: `${start}-${station}-${width}`,
+    cells: [
+      `${start} 07:00`,
+      `${start} 15:00`,
+      station,
+      "8954",
+      width,
+      "10",
+      "0",
+    ],
+  });
+  const drafts = [
+    row("2026-09-04", "51"),
+    row("2026-09-05", "51", "0"),
+    row("2026-09-04", "51"),
+    row("2026-02-30", "52"),
+    row("2026-09-06", "x"),
+    row("2026-09-05", "51"),
+  ];
+
+  it("potongan dengan kunci bersama sama dengan satu kali validasi penuh", () => {
+    const whole = validateRows(drafts, new Map()).errors;
+    const seen = new Set<string>();
+    const sliced = [0, 2, 4].flatMap(
+      (from) =>
+        validateRows(drafts.slice(from, from + 2), new Map(), seen, {
+          rowOffset: from,
+        }).errors,
+    );
+    expect(sliced).toEqual(whole);
+    expect(whole.map((error) => [error.row, error.message])).toContainEqual([
+      3,
+      DUPLICATE_KEY_MESSAGE,
+    ]);
+  });
+
+  it("tanggal yang sama dibaca sama pada pemanggilan berulang", () => {
+    const first = validateRows(drafts, new Map());
+    const again = validateRows(drafts, new Map());
+    expect(again).toEqual(first);
+    expect(first.rows[0]?.shiftStart).toBe("2026-09-04T07:00:00+07:00");
+  });
+
+  it("uniqueKeyOf memakai aturan kunci yang sama dengan validasi", () => {
+    expect(uniqueKeyOf(drafts[0]!.cells)).toBe(uniqueKeyOf(drafts[2]!.cells));
+    expect(uniqueKeyOf(drafts[0]!.cells)).toBe(
+      "2026-09-04T07:00:00+07:00|2026-09-04T15:00:00+07:00|51",
+    );
+    // Tanggal tidak nyata dan station bukan angka tidak punya kunci.
+    expect(uniqueKeyOf(drafts[3]!.cells)).toBeNull();
+    expect(uniqueKeyOf(drafts[4]!.cells)).toBeNull();
+  });
+
+  it("desimal tanpa zod tetap menolak bentuk yang sama", () => {
+    const widths = ["1e3", "-5", " ", "5.", ".5", "0x10", "56.5"];
+    const errors = validateRows(
+      widths.map((width, index) =>
+        row(`2026-09-${String(index + 10).padStart(2, "0")}`, "51", width),
+      ),
+      new Map(),
+    ).errors.filter((error) => error.field === "Width [cm]");
+    expect(errors.map((error) => error.row)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 });

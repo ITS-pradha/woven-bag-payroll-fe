@@ -27,6 +27,12 @@ export function DetailSelector({
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [open, setOpen] = useState(false);
+  /**
+   * False while the box still shows the employee just chosen. Opening the
+   * list then shows everyone in the run (not only the one name already in the
+   * box), so switching to another employee is one click, not delete-and-type.
+   */
+  const [typed, setTyped] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listId = useId();
@@ -40,7 +46,7 @@ export function DetailSelector({
   }, [search]);
 
   const employees = useQuery({
-    ...payrollEmployeeSearchOptions(runId, debouncedSearch),
+    ...payrollEmployeeSearchOptions(runId, typed ? debouncedSearch : ""),
     enabled: Boolean(runId && open),
     retry: false,
   });
@@ -49,8 +55,20 @@ export function DetailSelector({
   function choose(employee: PayrollSummary) {
     onEmployeeSelect(employee);
     setSearch(employee.employeeName);
+    setTyped(false);
     setOpen(false);
     inputRef.current?.focus();
+  }
+
+  function openList() {
+    if (open) return;
+    // Start on the employee already shown, so Enter keeps them and the
+    // arrows move from there.
+    const current = results.findIndex(
+      (employee) => employee.pin === selectedPin,
+    );
+    setActiveIndex(current >= 0 ? current : 0);
+    setOpen(true);
   }
 
   return (
@@ -66,6 +84,7 @@ export function DetailSelector({
           value={runId}
           onChange={(event) => {
             setSearch("");
+            setTyped(false);
             setOpen(false);
             onRunChange(event.target.value);
           }}
@@ -122,14 +141,34 @@ export function DetailSelector({
           }
           className="mt-0.5 block h-7 w-full border border-border-strong px-2 text-xs focus:outline-2 focus:outline-focus disabled:bg-surface-muted"
           value={search}
-          onFocus={() => setOpen(true)}
+          onFocus={(event) => {
+            // Selected, so typing replaces the chosen name instead of
+            // appending to it.
+            event.currentTarget.select();
+            openList();
+          }}
+          // A click while the box already has focus (right after choosing)
+          // fires no focus event, so it opens the list itself.
+          onMouseDown={openList}
+          // Same for selecting the chosen name: after a mouse click the caret
+          // lands where clicked, so it is selected here, after the click.
+          // Only while the box holds a chosen name — never over typed text.
+          onClick={(event) => {
+            if (!typed) event.currentTarget.select();
+          }}
           onChange={(event) => {
             setSearch(event.target.value);
+            setTyped(true);
             setActiveIndex(0);
             setOpen(true);
           }}
           onKeyDown={(event) => {
             if (event.key === "Escape") setOpen(false);
+            if (event.key === "ArrowDown" && !open) {
+              event.preventDefault();
+              openList();
+              return;
+            }
             if (event.key === "ArrowDown") {
               event.preventDefault();
               setActiveIndex((index) =>

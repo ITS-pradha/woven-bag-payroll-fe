@@ -31,6 +31,8 @@ export function PayrollTransitionDialog({
     };
   }, []);
   const locking = mode === "lock";
+  // Sama dengan batas backend: catatan ini yang disimpan di audit trail.
+  const missing = Math.max(0, NOTE_MIN_LENGTH - note.trim().length);
   return (
     <dialog
       ref={dialogRef}
@@ -86,10 +88,19 @@ export function PayrollTransitionDialog({
             aria-label={locking ? "Catatan penguncian" : "Catatan review"}
             rows={3}
             className="mt-1 w-full resize-y border border-border-strong px-2 py-1.5 text-xs focus:outline-2 focus:outline-focus"
+            aria-describedby="transition-note-hint"
             value={note}
             onChange={(event) => setNote(event.target.value)}
           />
         </label>
+        <p
+          id="transition-note-hint"
+          className={`mt-1 text-[0.6875rem] ${missing > 0 ? "text-warning-strong" : "text-muted"}`}
+        >
+          {missing > 0
+            ? `Minimal ${NOTE_MIN_LENGTH} karakter untuk audit trail · kurang ${missing} lagi.`
+            : `Catatan tersimpan di audit trail.`}
+        </p>
         {error ? (
           <p role="alert" className="mt-2 text-xs text-danger">
             {error}
@@ -111,7 +122,7 @@ export function PayrollTransitionDialog({
           className="min-h-8 rounded bg-brand px-3 text-xs font-bold text-white disabled:bg-brand-disabled"
           disabled={
             pending ||
-            note.trim().length < 5 ||
+            missing > 0 ||
             (locking && run.blockingExceptionCount > 0)
           }
           onClick={() => onConfirm(note.trim())}
@@ -122,3 +133,5 @@ export function PayrollTransitionDialog({
     </dialog>
   );
 }
+
+const NOTE_MIN_LENGTH = 5;

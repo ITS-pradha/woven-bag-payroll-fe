@@ -47,6 +47,7 @@ async function mockProductionBook(page: Page) {
             departmentCode: "KARUNG",
             status: "OPEN",
             createdAt: `${periodStart}T08:00:00+07:00`,
+            rowVersion: 1,
             closedAt: null,
           },
         ],

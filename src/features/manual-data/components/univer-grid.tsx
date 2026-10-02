@@ -41,6 +41,7 @@ import {
   columns,
   MAX_ROWS,
   entryCells,
+  normalizeDateInput,
   type DraftRow,
   type Entry,
   type Baseline,
@@ -61,6 +62,7 @@ import type { components } from "../../../api/generated/schema";
  * room to read it — the strip above the grid, for whichever row is selected.
  */
 const ERROR_CELL_BG = "#fdecec";
+const WARNING_CELL_BG = "#fdf3d7";
 
 export interface GridStatus {
   active: number;
@@ -68,18 +70,23 @@ export interface GridStatus {
   populated: number;
   dirty: boolean;
 }
+/** Sheet rows `start`..`end`, inclusive. */
+export interface EditedRows {
+  start: number;
+  end: number;
+}
 export interface AssigneeEditorAnchor {
   row: number;
   left: number;
   top: number;
 }
 /**
- * Where to paint the date affordance for a Shift Start/End cell. Unlike the
- * assignee popover this is anchored to the cell itself, not to the pointer:
- * the icon has to keep sitting in its cell when the selection is moved with
- * the keyboard.
+ * Where to paint the in-cell button: the calendar for Shift Start/End, the
+ * employee list for Assignee. Anchored to the cell itself, not to the
+ * pointer, so the button keeps sitting in its cell when the selection is
+ * moved with the keyboard or the sheet scrolls.
  */
-export interface DateCellAnchor {
+export interface CellAnchor {
   row: number;
   column: number;
   left: number;
@@ -93,8 +100,20 @@ export interface GridControl {
     result: components["schemas"]["ProductionEntryBatchResult"],
   ): void;
   read(): DraftRow[];
+  /**
+   * `count` rows from sheet row `row`, clipped to the rows that can hold
+   * anything. Lets a long job read the sheet in slices instead of one
+   * `read()` that blocks the tab.
+   */
+  readRange(row: number, count: number): DraftRow[];
   readRow(row: number): DraftRow | undefined;
   writeRange(row: number, cells: string[][]): void;
+  /**
+   * Grows the sheet to hold sheet row `row` before a sliced write. Growing
+   * re-points the checkbox validation over the whole column, so doing it
+   * once up front instead of once per slice keeps a long write linear.
+   */
+  reserveRows(row: number): void;
   finish(): Promise<unknown>;
   select(row: number): void;
   selected(): DraftRow[];
@@ -108,12 +127,21 @@ export interface GridControl {
    */
   removeDrafts(keys: readonly string[]): number;
   write(row: number, cells: string[]): void;
+  /**
+   * Adds `count` empty rows at the bottom of the sheet ("Add 1000 more rows
+   * at the bottom"). Stops at capacity; returns how many were added.
+   */
+  appendRows(count: number): number;
   activeCell(): { row: number; column: number };
   /**
    * Paints the cells that failed validation, replacing any previous marks.
-   * Pass an empty list to clear them all.
+   * Pass an empty list to clear them all. `warnings` are tinted amber: worth a
+   * look, not a refusal. A cell in both lists shows red.
    */
-  markErrors(cells: readonly { row: number; column: number }[]): void;
+  markErrors(
+    cells: readonly { row: number; column: number }[],
+    warnings?: readonly { row: number; column: number }[],
+  ): void;
 }
 interface Props {
   entries: Entry[];
@@ -122,7 +150,7 @@ interface Props {
   onReady(control: GridControl | null): void;
   onStatus(status: GridStatus): void;
   onAssignee(anchor: AssigneeEditorAnchor | null): void;
-  onDateCell(anchor: DateCellAnchor | null): void;
+  onCellTrigger(anchor: CellAnchor | null): void;
   onPaste(text: string): void;
   /** A spreadsheet action this workspace had to refuse, and why. */
   onBlocked(message: string): void;
@@ -137,6 +165,12 @@ interface Props {
    * rows above it. See `removeDrafts`.
    */
   onRowsRemoved(rows: readonly number[]): void;
+  /**
+   * Cell values changed — typed, filled, undone — in these sheet rows
+   * (inclusive). Not called for `writeRange`, whose caller validates what it
+   * wrote, nor for a checkbox: neither can fix a problem cell.
+   */
+  onEdited(rows: readonly EditedRows[]): void;
 }
 
 /**
@@ -147,10 +181,23 @@ interface Props {
  * it the native command is kept, because it stays undoable.
  */
 const NATIVE_REMOVE_MAX_BANDS = 20;
+/**
+ * Empty rows kept below the data. The sheet used to open with all 100.000
+ * rows of capacity, so a page of 300 rows scrolled through 99.700 blank ones
+ * and the scrollbar said nothing about how much data there was. Now it is
+ * the data plus this much room, growing as rows are reached; capacity
+ * (MAX_ROWS) is unchanged.
+ */
+const SPARE_ROWS = 50;
+/** Sheet length, header included, for data reaching `row`. */
+function sheetRowsFor(row: number) {
+  return Math.min(MAX_ROWS, Math.max(0, row) + SPARE_ROWS) + 1;
+}
 const UNDO_COMMANDS = new Set(["univer.command.undo", "univer.command.redo"]);
 
 /** Shift Start and Shift End — the two columns that hold a timestamp. */
 const DATE_COLUMNS = [1, 2];
+const ASSIGNEE_COLUMN = 4;
 /** Matches the workbook's `freeze` below: the header row and the select column. */
 const FROZEN_ROWS = 1;
 const FROZEN_COLUMNS = 1;
@@ -246,10 +293,11 @@ const BLOCKED_COMMANDS = new Set([
 const STRUCTURAL_COMMAND =
   /^sheet\.command\..*(insert|remove|move|sort|merge).*(row|col|range|sheet)/;
 /**
- * Paste keeps going through the preview panel instead of writing cells
- * straight in: that is the one path that normalises decimal commas and
- * single-digit hours and resolves an EID to a PIN. Every "Paste special" entry
- * delegates to `univer.command.paste`, so cancelling that covers them all.
+ * Paste goes through the page's `applyRows` instead of Univer's own writer:
+ * that is the one path that normalises decimal commas and single-digit hours
+ * and resolves an EID to a PIN before the cells are written. Every "Paste
+ * special" entry delegates to `univer.command.paste`, so cancelling that
+ * covers them all.
  */
 const PASTE_COMMANDS = new Set([
   "univer.command.paste",
@@ -282,15 +330,21 @@ const HIDDEN_MENU_ITEMS: Record<string, { hidden: true }> = Object.fromEntries(
 );
 
 /** A command payload carrying the rows it is about. */
-function rangeParam(
-  params: unknown,
-): { startRow: number; endRow: number; subUnitId?: string } | undefined {
+function rangeParam(params: unknown):
+  | {
+      startRow: number;
+      endRow: number;
+      startColumn?: number;
+      subUnitId?: string;
+    }
+  | undefined {
   if (!params || typeof params !== "object") return undefined;
   const range = (params as { range?: unknown }).range;
   if (!range || typeof range !== "object") return undefined;
-  const { startRow, endRow } = range as {
+  const { startRow, endRow, startColumn } = range as {
     startRow?: unknown;
     endRow?: unknown;
+    startColumn?: unknown;
   };
   if (typeof startRow !== "number" || typeof endRow !== "number")
     return undefined;
@@ -298,6 +352,7 @@ function rangeParam(
   return {
     startRow,
     endRow,
+    ...(typeof startColumn === "number" ? { startColumn } : {}),
     ...(typeof subUnitId === "string" ? { subUnitId } : {}),
   };
 }
@@ -332,6 +387,60 @@ function prepareInsertedRows(params: unknown) {
  * refused for one position.
  */
 
+/** Data columns (1..7 in the sheet): Shift Start … Result. */
+const FIRST_DATA_COLUMN = 1;
+const LAST_DATA_COLUMN = 7;
+
+/**
+ * A typed cell as the text the rest of the grid reads.
+ *
+ * Every value this grid writes is a STRING, but a cell typed by hand went
+ * through Univer's own detection: "10.000" became the NUMBER 10, "56.10"
+ * became 56.1. Mixed types made the same figure compare unequal to its
+ * baseline and turned a typed serial into a number nobody could read. A
+ * number in a date column is a spreadsheet day serial; it is shown as the
+ * wall-clock text the validator expects.
+ */
+function asText(cell: ICellData, column: number): ICellData | null {
+  if (cell.f || cell.v === null || cell.v === undefined) return null;
+  if (cell.t === CellValueType.STRING) return null;
+  const text = String(cell.v);
+  const v =
+    cell.t === CellValueType.NUMBER && DATE_COLUMNS.includes(column)
+      ? normalizeDateInput(text)
+      : text;
+  return { v, t: CellValueType.STRING };
+}
+
+/**
+ * Forces the cell values of a `set-range-values` command to text before
+ * Univer types them. Mutates the payload, like `prepareInsertedRows`, so the
+ * edit stays one undo step. Handles the single-cell shape the in-cell editor
+ * sends; matrices (fill, clear) are caught after the fact by `asText`.
+ */
+function forceTextValues(params: unknown) {
+  if (!params || typeof params !== "object") return;
+  const range = rangeParam(params);
+  const value = (params as { value?: unknown }).value;
+  if (!range || !value || typeof value !== "object") return;
+  const single =
+    range.startRow === range.endRow &&
+    "v" in value &&
+    !("f" in value && (value as ICellData).f);
+  const column = (range as { startColumn?: number }).startColumn;
+  if (
+    !single ||
+    column === undefined ||
+    column < FIRST_DATA_COLUMN ||
+    column > LAST_DATA_COLUMN
+  )
+    return;
+  const cell = value as ICellData;
+  if (cell.v === null || cell.v === undefined) return;
+  cell.v = String(cell.v);
+  cell.t = CellValueType.STRING;
+}
+
 /** The text Univer already read from the clipboard, when it read any. */
 function pastedText(params: unknown): string | undefined {
   if (!params || typeof params !== "object") return undefined;
@@ -346,44 +455,67 @@ export function UniverGrid({
   onReady,
   onStatus,
   onAssignee,
-  onDateCell,
+  onCellTrigger,
   onPaste,
   onBlocked,
   onRowsShifted,
   onRowsRemoved,
+  onEdited,
 }: Props) {
   const host = useRef<HTMLDivElement>(null);
+  /**
+   * `editable` is read through a ref, not captured by the mount effect:
+   * closing a book flips it, and rebuilding the workbook for that threw the
+   * whole unsaved draft away. The effect below applies it in place.
+   */
+  const editableRef = useRef(editable);
+  const workbookRef = useRef<{ setEditable(value: boolean): unknown } | null>(
+    null,
+  );
+  /** True while Univer's in-cell editor is open; paste then belongs to it. */
+  const editingRef = useRef(false);
   const pointer = useRef<
     { clientX: number; clientY: number; time: number } | undefined
   >(undefined);
   const callbacks = useRef({
     onStatus,
     onAssignee,
-    onDateCell,
+    onCellTrigger,
     onPaste,
     onBlocked,
     onRowsShifted,
     onRowsRemoved,
+    onEdited,
   });
   useEffect(() => {
     callbacks.current = {
       onStatus,
       onAssignee,
-      onDateCell,
+      onCellTrigger,
       onPaste,
       onBlocked,
       onRowsShifted,
       onRowsRemoved,
+      onEdited,
     };
   }, [
     onStatus,
     onAssignee,
-    onDateCell,
+    onCellTrigger,
     onPaste,
     onBlocked,
     onRowsShifted,
     onRowsRemoved,
+    onEdited,
   ]);
+  useEffect(() => {
+    editableRef.current = editable;
+    workbookRef.current?.setEditable(editable);
+    if (!editable) {
+      callbacks.current.onCellTrigger(null);
+      callbacks.current.onAssignee(null);
+    }
+  }, [editable]);
   useEffect(() => {
     if (!host.current) return;
     const container = document.createElement("div");
@@ -455,17 +587,23 @@ export function UniverGrid({
      */
     const keys: (string | undefined)[] = [];
     const keyIndex = new Map<string, number>();
+    const originals: (Baseline | undefined)[] = [...entries];
+    /**
+     * A saved row's key is its id — but read from `originals`, which moves
+     * with inserts and deletes, never from `entries`, which does not. After a
+     * row is inserted above saved rows, `entries[index]` is the row that used
+     * to sit there and has since moved down; the new empty slot took its id
+     * and two rows shared one key.
+     */
     function keyAt(index: number): string {
       const existing = keys[index];
       if (existing) return existing;
 
-      const key = entries[index]?.id ?? crypto.randomUUID();
+      const key = originals[index]?.id ?? crypto.randomUUID();
       keys[index] = key;
       keyIndex.set(key, index);
       return key;
     }
-
-    const originals: (Baseline | undefined)[] = [...entries];
     const baselineCells: (string[] | undefined)[] = [];
 
     /**
@@ -474,8 +612,11 @@ export function UniverGrid({
      * selama halaman cuma memuat beberapa ratus baris.
      */
     let touched = entries.length;
+    /** Filled once the sheet exists; see `ensureRows`. */
+    const growth: { to?: (row: number) => void } = {};
     const reach = (row: number) => {
       touched = Math.max(touched, Math.min(row, MAX_ROWS));
+      growth.to?.(row);
     };
 
     // `cellData` Univer bersifat sparse: baris kosong sengaja tidak ditulis.
@@ -501,7 +642,7 @@ export function UniverGrid({
         manual: {
           id: "manual",
           name: "Manual Data",
-          rowCount: MAX_ROWS + 1,
+          rowCount: sheetRowsFor(entries.length),
           columnCount: 8,
           defaultRowHeight: 34,
           defaultColumnWidth: 120,
@@ -520,6 +661,26 @@ export function UniverGrid({
     });
     const sheet = workbook.getActiveSheet();
     sheet.setRowHeaderWidth(ROW_HEADER_WIDTH);
+    /**
+     * Keeps SPARE_ROWS empty rows below the furthest row anyone has reached —
+     * by cursor, typing, paste, or import — so the sheet is always as long as
+     * its data plus room to add, never the full capacity up front.
+     */
+    function ensureRows(row: number) {
+      const needed = sheetRowsFor(row);
+      if (sheet.getMaxRows() < needed) setSheetRows(needed);
+    }
+    /** Sheet length, header included; never past capacity. */
+    function setSheetRows(total: number) {
+      const rows = Math.min(total, MAX_ROWS + 1);
+      sheet.setRowCount(rows);
+      // One checkbox rule, re-pointed — not a new rule per growth step.
+      sheet
+        .getRange(1, 0, 1, 1)
+        .getDataValidation()
+        ?.setRanges([sheet.getRange(1, 0, rows - 1, 1)]);
+    }
+    growth.to = ensureRows;
     /**
      * Spreads whatever width the container has beyond the column minimums.
      * Only ever grows — a container narrower than the minimums keeps them and
@@ -544,13 +705,15 @@ export function UniverGrid({
     fitColumns();
     const resize = new ResizeObserver(fitColumns);
     if (host.current) resize.observe(host.current);
+    // Covers the rows the sheet has; `ensureRows` stretches it as it grows.
     sheet
-      .getRange(1, 0, MAX_ROWS, 1)
+      .getRange(1, 0, sheet.getMaxRows() - 1, 1)
       .setDataValidation(
         api.newDataValidation().requireCheckbox("1", "0").build(),
       );
     // Applying the explicit mode also makes Univer recalculate/render the canvas.
-    workbook.setEditable(editable);
+    workbook.setEditable(editableRef.current);
+    workbookRef.current = workbook;
     let active = 1;
     let column = 1;
     let frame = 0;
@@ -580,20 +743,22 @@ export function UniverGrid({
      * scrolling and keyboard navigation, unlike the pointer-based assignee
      * popover.
      */
-    function showDateCell(row: number, col: number) {
-      if (!editable || row < 1 || !DATE_COLUMNS.includes(col)) {
-        callbacks.current.onDateCell(null);
+    function showCellTrigger(row: number, col: number) {
+      const assignee = col === ASSIGNEE_COLUMN;
+      if (
+        !editableRef.current ||
+        row < 1 ||
+        (!assignee && !DATE_COLUMNS.includes(col))
+      ) {
+        callbacks.current.onCellTrigger(null);
         return;
       }
-      // A saved row's shift and station are the unique key; the grid already
-      // refuses to edit them, so the icon must not offer to either.
-      if (originals[row - 1]) {
-        callbacks.current.onDateCell(null);
-        return;
-      }
+      // Saved rows keep both buttons: a shift typed into the wrong row is
+      // corrected in place, and Simpan sends that row as an inline edit so it
+      // keeps its id and history (see `patchProduction`).
       const rect = sheet.getRange(row, col).getCellRect();
       if (!rect || rect.width === 0) {
-        callbacks.current.onDateCell(null);
+        callbacks.current.onCellTrigger(null);
         return;
       }
       /*
@@ -615,7 +780,7 @@ export function UniverGrid({
         )
         .getCellRect();
       if (!origin || !start) {
-        callbacks.current.onDateCell(null);
+        callbacks.current.onCellTrigger(null);
         return;
       }
       const top = origin.top + (rect.top - start.top) - scroll.offsetY;
@@ -626,11 +791,11 @@ export function UniverGrid({
       // icon stranded over the frozen header.
       const frozen = sheet.getRange(0, 0).getCellRect();
       if (frozen && (top < frozen.bottom || left < frozen.right)) {
-        callbacks.current.onDateCell(null);
+        callbacks.current.onCellTrigger(null);
         return;
       }
       const cell = sheet.getRange(row, col).getCellData();
-      callbacks.current.onDateCell({
+      callbacks.current.onCellTrigger({
         row,
         column: col,
         left,
@@ -645,58 +810,257 @@ export function UniverGrid({
      * cuma biaya, dan biaya itu yang dulu membatasi kapasitas grid.
      */
     function read(): DraftRow[] {
-      if (touched < 1) return [];
-
-      const matrix = sheet.getRange(1, 1, touched, 7).getCellDatas();
-      return Array.from({ length: touched }, (_, index) => ({
-        key: keyAt(index),
-        cells: Array.from({ length: 7 }, (_, col) => {
-          const cell = matrix[index]?.[col];
-          return cell?.f ? cell.f : String(cell?.v ?? "");
-        }),
-        ...(originals[index] ? { original: originals[index] } : {}),
-      }));
+      return readRange(1, touched);
     }
-    function selectedIndices() {
-      if (touched < 1) return [];
+    function readRange(row: number, count: number): DraftRow[] {
+      const first = Math.max(0, row - 1);
+      const length = Math.min(first + count, touched) - first;
+      if (length < 1) return [];
 
-      const matrix = sheet.getRange(1, 0, touched, 1).getValues();
-      return Array.from({ length: touched }, (_, index) => index).filter(
-        (index) => matrix[index]?.[0] === true || matrix[index]?.[0] === 1,
-      );
+      const matrix = sheet.getRange(first + 1, 1, length, 7).getCellDatas();
+      return Array.from({ length }, (_, offset) => {
+        const index = first + offset;
+        return {
+          key: keyAt(index),
+          cells: Array.from({ length: 7 }, (_, col) => {
+            const cell = matrix[offset]?.[col];
+            return cell?.f ? cell.f : String(cell?.v ?? "");
+          }),
+          ...(originals[index] ? { original: originals[index] } : {}),
+        };
+      });
     }
-    /** Perbandingan per sel, tanpa merakit string gabungan untuk tiap baris. */
-    function changedFrom(
-      cells: readonly string[],
-      baseline?: readonly string[],
+    /*
+     * What the status line counts, kept per row (index = sheet row - 1) and
+     * updated from the rows each change touched.
+     *
+     * It used to be recounted from a full `read()` plus a `getValues` of the
+     * whole checkbox column after every change. Measured at 100.000 rows that
+     * was most of a 450-700 ms freeze per typed cell — the read builds an
+     * object per row, and `getValues` on the checkbox column runs the
+     * data-validation renderer for every cell of it.
+     *
+     * The slots move with inserts and deletes exactly like `keys` and
+     * `baselineCells`, so a structural change costs a splice, not a rescan.
+     */
+    const filled: (true | undefined)[] = [];
+    const changed: (true | undefined)[] = [];
+    const checked: (true | undefined)[] = [];
+    let filledCount = 0;
+    let changedCount = 0;
+    let checkedCount = 0;
+    /** Flips one slot and returns how the slot's count moves. */
+    function setSlot(slots: (true | undefined)[], index: number, on: boolean) {
+      if (on === (slots[index] === true)) return 0;
+      slots[index] = on ? true : undefined;
+      return on ? 1 : -1;
+    }
+    function setFilled(index: number, on: boolean) {
+      filledCount += setSlot(filled, index, on);
+    }
+    function setChanged(index: number, on: boolean) {
+      changedCount += setSlot(changed, index, on);
+    }
+    function setChecked(index: number, on: boolean) {
+      checkedCount += setSlot(checked, index, on);
+    }
+    /** Drops `count` slots at `index` from the counts, before they are spliced out. */
+    function forgetSlots(index: number, count: number) {
+      for (let offset = 0; offset < count; offset++) {
+        setFilled(index + offset, false);
+        setChanged(index + offset, false);
+        setChecked(index + offset, false);
+      }
+    }
+    const isChecked = (value: unknown) =>
+      value === true || value === 1 || value === "1";
+    /** Recounts rows `from`..`to` (indices, inclusive) from the sheet. */
+    function recountCells(from: number, to: number) {
+      const last = Math.min(to, touched - 1);
+      if (last < from) return;
+      const matrix = sheet
+        .getRange(from + 1, 1, last - from + 1, 7)
+        .getCellDatas();
+      for (let index = from; index <= last; index++) {
+        const row = matrix[index - from];
+        const baseline = baselineCells[index];
+        let any = false;
+        let differs = false;
+        for (let col = 0; col < 7; col++) {
+          const cell = row?.[col];
+          const text = cell?.f ? cell.f : String(cell?.v ?? "");
+          if (text) any = true;
+          if (baseline && text !== (baseline[col] ?? "")) differs = true;
+        }
+        setFilled(index, any);
+        setChanged(index, baseline ? differs : any);
+      }
+    }
+    function recountChecks(from: number, to: number) {
+      const last = Math.min(to, touched - 1);
+      if (last < from) return;
+      const matrix = sheet
+        .getRange(from + 1, 0, last - from + 1, 1)
+        .getCellDatas();
+      for (let index = from; index <= last; index++)
+        setChecked(index, isChecked(matrix[index - from]?.[0]?.v));
+    }
+    /** Index ranges, inclusive, still to be recounted on the next frame. */
+    let pendingCells: [number, number][] = [];
+    let pendingChecks: [number, number][] = [];
+    /** Overlapping and adjacent ranges as one, so a row is read once. */
+    function coalesce(ranges: [number, number][]) {
+      const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
+      const merged: [number, number][] = [];
+      for (const [from, to] of sorted) {
+        const last = merged.at(-1);
+        if (last && from <= last[1] + 1) last[1] = Math.max(last[1], to);
+        else merged.push([from, to]);
+      }
+      return merged;
+    }
+    /** Queues the rows of these sheet ranges to be recounted. */
+    function enqueue(
+      ranges: readonly {
+        startRow: number;
+        endRow: number;
+        startColumn: number;
+        endColumn: number;
+      }[],
     ) {
-      if (!baseline) return cells.some(Boolean);
-      for (let col = 0; col < cells.length; col++)
-        if (cells[col] !== (baseline[col] ?? "")) return true;
-      return false;
+      for (const range of ranges) {
+        const from = Math.max(0, range.startRow - 1);
+        const to = range.endRow - 1;
+        if (to < from) continue;
+        if (
+          range.endColumn >= FIRST_DATA_COLUMN &&
+          range.startColumn <= LAST_DATA_COLUMN
+        )
+          pendingCells.push([from, to]);
+        if (range.startColumn <= 0) pendingChecks.push([from, to]);
+      }
     }
+    /** Counts from the last scan; a cursor move reuses them. */
+    let counts = { populated: 0, dirty: false, selected: 0 };
+    /** Something changed the cells or the rows: recount on the next frame. */
     function notify() {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(emitStatus);
+    }
+    /**
+     * Only the cursor moved. Re-reading every touched row for that made each
+     * arrow key on a 100.000-row sheet a full scan; the counts cannot have
+     * changed, so the last ones are sent with the new active row.
+     */
+    function notifyActive() {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(emitStatus);
     }
     function emitStatus() {
       if (disposed) return;
-      const rows = read();
-      let populated = 0;
-      let dirty = false;
+      const cells = coalesce(pendingCells);
+      const checks = coalesce(pendingChecks);
+      pendingCells = [];
+      pendingChecks = [];
+      for (const [from, to] of cells) recountCells(from, to);
+      for (const [from, to] of checks) recountChecks(from, to);
+      counts = {
+        populated: filledCount,
+        dirty: changedCount > 0,
+        selected: checkedCount,
+      };
 
-      for (let index = 0; index < rows.length; index++) {
-        const cells = rows[index]!.cells;
-        if (cells.some(Boolean)) populated += 1;
-        if (!dirty && changedFrom(cells, baselineCells[index])) dirty = true;
+      callbacks.current.onStatus({ active, ...counts });
+    }
+    /**
+     * Above zero while this grid makes a change whose `SheetValueChanged` it
+     * must not handle as an edit: painting the error marks (a style-only
+     * `set-range-values`), its own text conversions, and writes whose rows it
+     * already queues itself. Univer 0.25.1 emits the event synchronously
+     * inside the call (measured), so a counter around the call is enough.
+     *
+     * Without it every mark painted ran `afterValueChange` over the painted
+     * range, whose per-cell `setValue` each sent sheets-formula through a
+     * full-sheet scan: errors × sheet size, 268 s for 10.000 marks on a
+     * 50.000-row paste.
+     */
+    let quiet = 0;
+    function quietly(run: () => void) {
+      quiet += 1;
+      try {
+        run();
+      } finally {
+        quiet -= 1;
       }
-
-      callbacks.current.onStatus({
-        active,
-        selected: selectedIndices().length,
-        populated,
-        dirty,
-      });
+    }
+    /**
+     * After any value change: brings typed cells back to text (`asText`), and
+     * stretches the scan window to the last row that actually holds
+     * something. A fill dragged past the window would otherwise be invisible
+     * to `read()`; a selection reaching the bottom of the sheet (Ctrl+A, a
+     * whole column) no longer stretches it, because only content does.
+     *
+     * The conversions are written per vertical run of cells — one
+     * `setValues` for a filled column, not one `setValue` per cell — because
+     * every write is another pass of the formula engine over the sheet.
+     */
+    function afterValueChange(
+      ranges: readonly {
+        startRow: number;
+        endRow: number;
+        startColumn: number;
+        endColumn: number;
+      }[],
+    ) {
+      const maxRow = sheet.getMaxRows() - 1;
+      let last = 0;
+      const conversions = new Map<number, { row: number; cell: ICellData }[]>();
+      for (const range of ranges) {
+        const top = Math.max(1, range.startRow);
+        const bottom = Math.min(maxRow, range.endRow);
+        const left = Math.max(FIRST_DATA_COLUMN, range.startColumn);
+        const right = Math.min(LAST_DATA_COLUMN, range.endColumn);
+        if (bottom < top || right < left) continue;
+        const matrix = sheet
+          .getRange(top, left, bottom - top + 1, right - left + 1)
+          .getCellDatas();
+        matrix.forEach((row, rowOffset) =>
+          row.forEach((cell, colOffset) => {
+            if (!cell) return;
+            if (
+              cell.f ||
+              (cell.v !== null && cell.v !== undefined && cell.v !== "")
+            )
+              last = Math.max(last, top + rowOffset);
+            const text = asText(cell, left + colOffset);
+            if (!text) return;
+            const column = left + colOffset;
+            const list = conversions.get(column) ?? [];
+            list.push({ row: top + rowOffset, cell: text });
+            conversions.set(column, list);
+          }),
+        );
+      }
+      if (conversions.size)
+        quietly(() => {
+          for (const [column, list] of conversions) {
+            list.sort((a, b) => a.row - b.row);
+            let start = 0;
+            for (let index = 1; index <= list.length; index++) {
+              if (
+                index < list.length &&
+                list[index]!.row === list[index - 1]!.row + 1
+              )
+                continue;
+              const run = list.slice(start, index);
+              sheet
+                .getRange(run[0]!.row, column, run.length, 1)
+                .setValues(run.map((item) => [item.cell]));
+              start = index;
+            }
+          }
+        });
+      if (last > touched) reach(last);
     }
     let marked: readonly { row: number; column: number }[] = [];
     /**
@@ -733,7 +1097,6 @@ export function UniverGrid({
       const span = touched - first;
       const removedSet = new Set(indices);
       const cells = sheet.getRange(first + 1, 1, span, 7).getCellDatas();
-      const checks = sheet.getRange(first + 1, 0, span, 1).getValues();
       // Written back as explicit values — the same shape `write()` uses —
       // never as the raw `ICellData` read out: that carries style ids and
       // internal fields, and handing it back to `setValues` lost rows.
@@ -748,30 +1111,40 @@ export function UniverGrid({
             return { v: String(cell?.v ?? ""), t: CellValueType.STRING };
           }),
         );
-        const checked = checks[offset]?.[0];
-        keptChecks.push([checked === true || checked === 1 ? 1 : 0]);
+        keptChecks.push([checked[first + offset] ? 1 : 0]);
       }
 
-      const whole = sheet.getRange(first + 1, 1, span, 7);
-      whole.clearContent();
-      // Red marks are repainted by the page once its errors move (below);
-      // clearing them here keeps a mark from staying on the row that slid
-      // into a removed row's place.
-      whole.clearFormat();
+      // Quiet: these writes only move content up, and the bookkeeping below
+      // moves with them in one pass — handling each write as an edit would
+      // rescan the whole span three times over.
+      quietly(() => {
+        const whole = sheet.getRange(first + 1, 1, span, 7);
+        whole.clearContent();
+        // Red marks are repainted by the page once its errors move (below);
+        // clearing them here keeps a mark from staying on the row that slid
+        // into a removed row's place.
+        whole.clearFormat();
+        sheet
+          .getRange(first + 1, 0, span, 1)
+          .setValues(
+            keptChecks.concat(
+              Array.from({ length: span - keptChecks.length }, () => [0]),
+            ),
+          );
+        if (keptCells.length)
+          sheet
+            .getRange(first + 1, 1, keptCells.length, 7)
+            .setValues(keptCells);
+      });
       marked = marked.filter((cell) => cell.row < first + 1);
-      sheet
-        .getRange(first + 1, 0, span, 1)
-        .setValues(
-          keptChecks.concat(
-            Array.from({ length: span - keptChecks.length }, () => [0]),
-          ),
-        );
-      if (keptCells.length)
-        sheet.getRange(first + 1, 1, keptCells.length, 7).setValues(keptCells);
 
+      for (const index of indices) forgetSlots(index, 1);
       compactSlots(keys, indices);
       compactSlots(originals, indices);
       compactSlots(baselineCells, indices);
+      compactSlots(filled, indices);
+      compactSlots(changed, indices);
+      compactSlots(checked, indices);
       keyIndex.clear();
       keys.forEach((key, position) => {
         if (key) keyIndex.set(key, position);
@@ -798,10 +1171,17 @@ export function UniverGrid({
         insertSlots(keys, index, delta);
         insertSlots(originals, index, delta);
         insertSlots(baselineCells, index, delta);
+        insertSlots(filled, index, delta);
+        insertSlots(changed, index, delta);
+        insertSlots(checked, index, delta);
       } else {
+        forgetSlots(index, -delta);
         removeSlots(keys, index, -delta);
         removeSlots(originals, index, -delta);
         removeSlots(baselineCells, index, -delta);
+        removeSlots(filled, index, -delta);
+        removeSlots(changed, index, -delta);
+        removeSlots(checked, index, -delta);
       }
       // Rebuilt wholesale: every key below the change sits at a new index, and
       // this runs once per user action, not per row.
@@ -813,6 +1193,12 @@ export function UniverGrid({
       // Univer moved the red backgrounds along with the rows; this moves the
       // record of which cells carry them, so clearing later finds them.
       marked = shiftRows(marked, from, delta);
+      // An inserted row is normally empty, but an undone delete inserts the
+      // rows back WITH their content.
+      if (delta > 0) {
+        pendingCells.push([index, index + delta - 1]);
+        pendingChecks.push([index, index + delta - 1]);
+      }
       callbacks.current.onRowsShifted(from, delta);
       notify();
     }
@@ -845,12 +1231,12 @@ export function UniverGrid({
         : "";
     }
     /**
-     * Sends a paste to the preview panel instead of letting Univer write the
-     * cells. Ctrl+V already arrives as text; the menu entry has only just read
+     * Hands a paste to the page, which normalises it and writes the cells,
+     * instead of letting Univer write the raw text. Ctrl+V already arrives as text; the menu entry has only just read
      * the clipboard itself, so this reads it again.
      */
     function requestPaste(params: unknown) {
-      if (!editable) return;
+      if (!editableRef.current) return;
       const text = pastedText(params);
       if (text !== undefined) {
         callbacks.current.onPaste(text);
@@ -870,6 +1256,7 @@ export function UniverGrid({
     const control: GridControl = {
       readRow(row) {
         if (row < 1 || row > MAX_ROWS) return;
+        ensureRows(row);
         const key = keyAt(row - 1);
         const cells = sheet.getRange(row, 1, 1, 7).getCellDatas()[0];
         const original = originals[row - 1];
@@ -884,28 +1271,56 @@ export function UniverGrid({
       },
       writeRange(row, cells) {
         if (
-          !editable ||
+          !editableRef.current ||
           !cells.length ||
           row < 1 ||
           row + cells.length > MAX_ROWS + 1
         )
           return;
         reach(row + cells.length - 1);
-        sheet
-          .getRange(row, 1, cells.length, 7)
-          .setValues(
-            cells.map((values) =>
-              values.map((v) => ({ v, t: CellValueType.STRING })),
-            ),
+        // Quiet: every value written here is already text, so there is
+        // nothing for `afterValueChange` to convert, and the counts follow
+        // from `cells` below without reading the rows back.
+        quietly(() => {
+          // One command for the checkbox and the seven cells: each
+          // `set-range-values` costs a formula-engine pass over the sheet and
+          // a row-height pass over its range, so two per slice was double.
+          // The checkbox gets its 0 here because a checkbox only paints once
+          // its cell has a value.
+          sheet
+            .getRange(row, 0, cells.length, 8)
+            .setValues(
+              cells.map((values) => [
+                { v: 0, t: CellValueType.NUMBER },
+                ...values.map((v) => ({ v, t: CellValueType.STRING })),
+              ]),
+            );
+        });
+        cells.forEach((values, offset) => {
+          const index = row - 1 + offset;
+          const baseline = baselineCells[index];
+          setFilled(index, values.some(Boolean));
+          setChanged(
+            index,
+            baseline
+              ? values.some((value, col) => value !== (baseline[col] ?? ""))
+              : values.some(Boolean),
           );
-        // Checkbox baru tergambar setelah selnya punya nilai.
-        sheet
-          .getRange(row, 0, cells.length, 1)
-          .setValues(Array.from({ length: cells.length }, () => [0]));
+          setChecked(index, false);
+        });
         notify();
       },
+      reserveRows(row) {
+        if (row >= 1) ensureRows(Math.min(row, MAX_ROWS));
+      },
       accept(rows, result) {
-        const current = read();
+        // One sheet read for a batch; a single moved shift (accepted one at a
+        // time by the PATCH path) reads only its own row instead of the whole
+        // touched window per row.
+        const current: (DraftRow | undefined)[] | null =
+          result.rows.length > 64 ? read() : null;
+        const cellsAt = (index: number) =>
+          (current ? current[index] : control.readRow(index + 1))?.cells ?? [];
         // Peta, bukan `indexOf` di dalam loop: satu batch 10.000 baris berarti
         // 100 juta perbandingan kalau dicari linear.
         const inputs = new Map(rows.map((row) => [row.clientRowId, row]));
@@ -927,11 +1342,13 @@ export function UniverGrid({
             sourceType: originals[index]?.sourceType ?? "MANUAL",
             status: "ACTIVE",
           };
-          baselineCells[index] = [...(current[index]?.cells ?? [])];
+          baselineCells[index] = [...cellsAt(index)];
+          setChanged(index, false);
         }
         notify();
       },
       read,
+      readRange,
       finish: () => workbook.endEditingAsync(true),
       activeCell: () => ({ row: active, column }),
       select(row) {
@@ -944,36 +1361,44 @@ export function UniverGrid({
         // flush against the frozen header, and to the first scrollable column
         // so a jump always starts reading at Shift Start.
         sheet.scrollToCell(Math.max(FROZEN_ROWS, active - 2), FROZEN_COLUMNS);
-        notify();
+        // A cursor reaching past the data adds only empty rows: nothing to
+        // count.
+        notifyActive();
       },
       selected: () => {
         const rows = read();
-        return selectedIndices().flatMap((index) =>
-          rows[index] ? [rows[index]] : [],
-        );
+        return rows.filter((_, index) => checked[index]);
       },
       selectAll(value) {
-        const rows = read();
-        if (!rows.length) return;
+        if (touched < 1) return;
 
-        sheet
-          .getRange(1, 0, rows.length, 1)
-          .setValues(
-            rows.map((row) => [value && row.cells.some(Boolean) ? 1 : 0]),
-          );
+        const next = Array.from(
+          { length: touched },
+          (_, index) => value && filled[index] === true,
+        );
+        quietly(() => {
+          sheet
+            .getRange(1, 0, touched, 1)
+            .setValues(next.map((on) => [on ? 1 : 0]));
+        });
+        next.forEach((on, index) => setChecked(index, on));
         emitStatus();
       },
       selectRow(row, value) {
         reach(row);
-        sheet.getRange(row, 0).setValue(value ? 1 : 0);
+        quietly(() => {
+          sheet.getRange(row, 0).setValue(value ? 1 : 0);
+        });
+        setChecked(row - 1, value);
         emitStatus();
       },
       isSelected: (row) => {
+        if (row >= sheet.getMaxRows()) return false;
         const value = sheet.getRange(row, 0).getValue();
         return value === true || value === 1;
       },
       removeDrafts(draftKeys) {
-        if (!editable) return 0;
+        if (!editableRef.current) return 0;
         const indices = [
           ...new Set(
             draftKeys.flatMap((key) => {
@@ -1015,60 +1440,85 @@ export function UniverGrid({
         notify();
         return removed;
       },
-      markErrors(cells) {
-        // Styling one cell at a time would be tens of thousands of commands
-        // for a large import. Consecutive rows in the same column are painted
-        // as a single range instead, which is how these actually arrive: one
-        // operator owns a run of rows.
-        const paint = (
-          targets: readonly { row: number; column: number }[],
-          apply: (range: ReturnType<typeof sheet.getRange>) => void,
-        ) => {
-          const byColumn = new Map<number, number[]>();
-          for (const cell of targets) {
-            const rows = byColumn.get(cell.column) ?? [];
-            rows.push(cell.row);
-            byColumn.set(cell.column, rows);
-          }
+      markErrors(cells, warnings = []) {
+        /*
+          One `set-range-values` for the whole repaint — clearing the cells
+          no longer marked and tinting the new ones together — instead of a
+          clear and a paint per run of cells. Bad cells rarely form runs (a
+          zero Width every fifth row is 2.000 separate cells), and each command
+          is another pass of the formula engine over the sheet.
 
-          for (const [column, rows] of byColumn) {
-            rows.sort((a, b) => a - b);
-            let start = 0;
-            for (let index = 1; index <= rows.length; index += 1) {
-              const broken =
-                index === rows.length || rows[index] !== rows[index - 1]! + 1;
-              if (!broken) continue;
-              const from = rows[start]!;
-              const span = rows[index - 1]! - from + 1;
-              apply(sheet.getRange(from, column, span, 1));
-              start = index;
-            }
-          }
-        };
-
-        // Clearing first, and only what was actually marked, keeps an empty
-        // list cheap and never touches a cell this never painted.
-        //
-        // Cleared with `clearFormat`, NOT by painting white: Univer draws its
-        // gridlines underneath the cell background, so a white fill covers
-        // them and a corrected row is left looking borderless. Only columns
-        // 1..7 are ever marked, and those carry no formatting of their own
-        // (the header style is row 0, the checkbox validation is column 0),
-        // so there is nothing else here for clearFormat to take away.
-        if (marked.length) paint(marked, (range) => range.clearFormat());
-        marked = cells.filter(
-          (cell) => cell.row >= 1 && cell.column >= 1 && cell.column <= 7,
+          The matrix is sparse and keyed by ABSOLUTE row and column: measured
+          on Univer 0.25.1, `FRange.setValues` applies an object matrix at the
+          coordinates it names, so the range starts at A1, where absolute and
+          relative are the same thing either way. A cell given only `s` keeps
+          its value. `s: null` drops its style — the same result `clearFormat`
+          gave, NOT a white fill: Univer draws its gridlines underneath the
+          cell background, so a white fill covers them and a corrected row is
+          left looking borderless. Only columns 1..7 are ever marked, and
+          those carry no formatting of their own (the header style is row 0,
+          the checkbox validation is column 0), so there is nothing else for
+          the clear to take away.
+        */
+        const maxRow = sheet.getMaxRows() - 1;
+        const inSheet = (cell: { row: number; column: number }) =>
+          cell.row >= 1 &&
+          cell.row <= maxRow &&
+          cell.column >= FIRST_DATA_COLUMN &&
+          cell.column <= LAST_DATA_COLUMN;
+        const slot = (cell: { row: number; column: number }) =>
+          cell.row * (LAST_DATA_COLUMN + 1) + cell.column;
+        const red = cells.filter(inSheet);
+        const reds = new Set(red.map(slot));
+        const amber = warnings.filter(
+          (cell) => inSheet(cell) && !reds.has(slot(cell)),
         );
-        if (marked.length) {
-          paint(marked, (range) => range.setBackgroundColor(ERROR_CELL_BG));
-        }
+        const matrix: Record<number, Record<number, ICellData>> = {};
+        let bottom = 0;
+        const put = (
+          cell: { row: number; column: number },
+          style: ICellData["s"],
+        ) => {
+          (matrix[cell.row] ??= {})[cell.column] = { s: style };
+          bottom = Math.max(bottom, cell.row);
+        };
+        // Clearing first, and only what was actually marked, keeps an empty
+        // list cheap and never touches a cell this never painted. A cell
+        // marked again is simply overwritten by its new tint below.
+        for (const cell of marked) if (inSheet(cell)) put(cell, null);
+        for (const cell of amber) put(cell, { bg: { rgb: WARNING_CELL_BG } });
+        for (const cell of red) put(cell, { bg: { rgb: ERROR_CELL_BG } });
+        marked = [...red, ...amber];
+        if (bottom < 1) return;
+        quietly(() => {
+          sheet
+            .getRange(0, 0, bottom + 1, LAST_DATA_COLUMN + 1)
+            .setValues(matrix);
+        });
+      },
+      appendRows(count) {
+        if (!editableRef.current || count < 1) return 0;
+        const before = sheet.getMaxRows();
+        if (before > MAX_ROWS) return 0;
+        setSheetRows(before + Math.floor(count));
+        return sheet.getMaxRows() - before;
       },
       write(row, cells) {
-        if (!editable) return;
+        if (!editableRef.current) return;
         reach(row);
-        sheet
-          .getRange(row, 1, 1, 7)
-          .setValues([cells.map((v) => ({ v, t: CellValueType.STRING }))]);
+        // Only the cells that differ: rewriting the whole row for one
+        // changed date or assignee clobbered whatever the admin had just
+        // typed elsewhere in it, and cost a seven-cell undo step.
+        const current = sheet.getRange(row, 1, 1, 7).getCellDatas()[0];
+        cells.forEach((v, index) => {
+          const cell = current?.[index];
+          const now = cell?.f ?? String(cell?.v ?? "");
+          if (now === v && (cell?.t === CellValueType.STRING || v === ""))
+            return;
+          sheet
+            .getRange(row, index + 1)
+            .setValue({ v, t: CellValueType.STRING });
+        });
         notify();
       },
     };
@@ -1082,8 +1532,13 @@ export function UniverGrid({
           return;
         }
         if (PASTE_COMMANDS.has(event.id)) {
+          if (editingRef.current) return;
           event.cancel = true;
           requestPaste(event.params);
+          return;
+        }
+        if (event.id === "sheet.command.set-range-values") {
+          forceTextValues(event.params);
           return;
         }
         const removing = ROW_REMOVE_COMMANDS.has(event.id);
@@ -1114,41 +1569,74 @@ export function UniverGrid({
         const selection = event.selections[0];
         if (selection && selection.startRow > 0) {
           active = selection.startRow;
-          // Jendela pemindaian mengikuti ke mana pun orang menaruh kursor:
-          // mengetik di baris 40.000 harus terbaca, bukan hilang karena
-          // jendelanya berhenti di baris terakhir yang pernah terisi.
-          reach(selection.endRow ?? active);
+          // Jendela pemindaian mengikuti kursor: mengetik di baris 40.000
+          // harus terbaca. Hanya sel aktif — ujung seleksi (Ctrl+A, satu
+          // kolom penuh) tidak berisi apa-apa dan dulu memanjangkan sheet
+          // sampai kapasitas; isi yang benar-benar masuk dikejar
+          // `afterValueChange`.
+          const grew = active > touched;
+          reach(active);
           column = Math.max(1, selection.startColumn);
           if (selection.startColumn !== 4) callbacks.current.onAssignee(null);
-          showDateCell(active, column);
-          notify();
+          showCellTrigger(active, column);
+          if (grew) notify();
+          else notifyActive();
         }
       }),
 
-      api.addEvent(api.Event.SheetValueChanged, notify),
+      api.addEvent(api.Event.SheetValueChanged, (event) => {
+        if (quiet) return;
+        const ranges = event.effectedRanges
+          .filter((range) => range.getSheetId() === sheet.getSheetId())
+          .map((range) => range.getRange());
+        afterValueChange(ranges);
+        enqueue(ranges);
+        notify();
+        // Only data cells can fix a problem; a ticked checkbox cannot.
+        const edited = ranges
+          .filter(
+            (range) =>
+              range.endColumn >= FIRST_DATA_COLUMN &&
+              range.startColumn <= LAST_DATA_COLUMN &&
+              range.endRow >= 1,
+          )
+          .map((range) => ({
+            start: Math.max(1, range.startRow),
+            end: range.endRow,
+          }));
+        if (edited.length) callbacks.current.onEdited(edited);
+      }),
+      api.addEvent(api.Event.SheetEditStarted, () => {
+        editingRef.current = true;
+      }),
       // The anchor is measured, so it goes stale the moment the sheet scrolls
       // under it.
-      api.addEvent(api.Event.Scroll, () => showDateCell(active, column)),
+      api.addEvent(api.Event.Scroll, () => showCellTrigger(active, column)),
       api.addEvent(api.Event.CellClicked, (event) => {
         if (event.row > 0) {
           active = event.row;
+          const grew = event.row > touched;
           reach(event.row);
           column = Math.max(1, event.column);
-          notify();
-          if (event.column === 4 && editable) openAssignee(event.row);
-          else callbacks.current.onAssignee(null);
-          showDateCell(event.row, column);
+          if (grew) notify();
+          else notifyActive();
+          // A click only selects the cell; the list opens from the button
+          // painted inside it, the same as the calendar.
+          callbacks.current.onAssignee(null);
+          showCellTrigger(event.row, column);
         }
       }),
-      api.addEvent(api.Event.SheetEditEnded, () =>
-        showDateCell(active, column),
-      ),
+      api.addEvent(api.Event.SheetEditEnded, () => {
+        editingRef.current = false;
+        showCellTrigger(active, column);
+      }),
       api.addEvent(api.Event.BeforeSheetEditStart, (event) => {
-        callbacks.current.onDateCell(null);
+        callbacks.current.onCellTrigger(null);
         if (
-          !editable ||
+          !editableRef.current ||
           event.row === 0 ||
-          (originals[event.row - 1] && event.column >= 1 && event.column <= 3)
+          // A saved row's station stays fixed; its shift can be corrected.
+          (originals[event.row - 1] && event.column === 3)
         )
           event.cancel = true;
         if (event.column === 4) {
@@ -1164,9 +1652,14 @@ export function UniverGrid({
       window.dispatchEvent(new Event("resize")),
     );
     onReady(control);
+    // The saved rows this sheet opened with: counted once, then kept up by
+    // the changes that touch them.
+    if (entries.length) pendingCells.push([0, entries.length - 1]);
     notify();
     return () => {
       disposed = true;
+      workbookRef.current = null;
+      editingRef.current = false;
       cancelAnimationFrame(frame);
       cancelAnimationFrame(layoutFrame);
       resize.disconnect();
@@ -1178,7 +1671,7 @@ export function UniverGrid({
         container.remove();
       }, 0);
     };
-  }, [entries, names, editable, onReady]);
+  }, [entries, names, onReady]);
   return (
     <div
       className="manual-grid-viewport"
@@ -1191,6 +1684,9 @@ export function UniverGrid({
       }}
       onWheelCapture={() => onAssignee(null)}
       onPasteCapture={(event) => {
+        // Inside the in-cell editor a paste is text for that one cell, the
+        // way every spreadsheet treats it — not a block for `applyRows`.
+        if (editingRef.current) return;
         event.preventDefault();
         event.stopPropagation();
         if (editable) onPaste(event.clipboardData.getData("text/plain"));

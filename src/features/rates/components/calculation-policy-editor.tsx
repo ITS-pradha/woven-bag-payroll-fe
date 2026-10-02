@@ -19,6 +19,7 @@ import { rateEditErrorMessage } from "../model/rate-edit-errors";
 import { LiveEditConfirm } from "./live-edit-confirm";
 import { RateStatusBadge } from "./rate-status-badge";
 import { SpecialRateRulesEditor } from "./special-rate-rules-editor";
+import { PanelSkeleton } from "../../../components/skeleton/skeleton";
 
 interface CalculationPolicyEditorProps {
   version: RateVersion;
@@ -30,7 +31,13 @@ interface CalculationPolicyEditorProps {
 export function CalculationPolicyEditor(props: CalculationPolicyEditorProps) {
   const query = useQuery(rateCalculationPolicyQueryOptions(props.version.id));
   if (query.isPending)
-    return <PolicyState label="Memuat aturan kalkulasi…" busy />;
+    return (
+      <PanelSkeleton
+        label="Memuat aturan kalkulasi"
+        lines={7}
+        className="min-h-80"
+      />
+    );
   if (query.isError)
     return (
       <PolicyState

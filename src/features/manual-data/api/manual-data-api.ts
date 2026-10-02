@@ -47,7 +47,9 @@ const batch = z.object({
       clientRowId: z.string(),
       outcome: z.enum(["INSERTED", "UPDATED", "UNCHANGED", "REJECTED"]),
       productionEntryId: z.string().uuid().nullable().optional(),
-      rowVersion: z.number().nullable().optional(),
+      // Coerced: a bigint column serialised as a string must not fail the
+      // whole save's contract check after the rows were already committed.
+      rowVersion: z.coerce.number().int().positive().nullable().optional(),
       fieldErrors: z
         .array(
           z.object({
@@ -61,6 +63,48 @@ const batch = z.object({
     }),
   ),
 });
+
+/**
+ * The batch response failed its contract check. The server DID answer, so the
+ * outcome is known to be unusable rather than unknown: retrying the same key
+ * replays the same malformed body. The caller treats it as definitive.
+ */
+export class BatchResponseShapeError extends Error {
+  constructor() {
+    super(
+      "Respons simpan dari backend belum sesuai OpenAPI. Data tidak diterapkan; muat ulang untuk melihat yang tersimpan, lalu minta backend menyelaraskan kontrak.",
+    );
+    this.name = "BatchResponseShapeError";
+  }
+}
+
+/**
+ * A multi-request save failed after earlier requests had committed.
+ *
+ * Those rows ARE on the server; dropping them with the error would leave the
+ * grid showing them as unsaved and the next Simpan sending them again
+ * without their new row versions. `completed` has the same shape as a normal
+ * result so the grid can accept it as-is.
+ */
+export class PartialSaveError extends Error {
+  readonly completed: BatchResult;
+  readonly failedChunkIndex: number;
+  override readonly cause: unknown;
+
+  constructor(
+    completed: BatchResult,
+    failedChunkIndex: number,
+    cause: unknown,
+  ) {
+    super(
+      cause instanceof Error ? cause.message : "Sebagian batch gagal disimpan.",
+    );
+    this.name = "PartialSaveError";
+    this.completed = completed;
+    this.failedChunkIndex = failedChunkIndex;
+    this.cause = cause;
+  }
+}
 
 function contract<T>(schema: z.ZodType, data: T): T {
   const parsed = schema.safeParse(data);
@@ -87,6 +131,7 @@ const payrollPeriod: z.ZodType<components["schemas"]["PayrollPeriod"]> =
     periodEnd: z.string(),
     departmentCode: z.string(),
     status: z.enum(["OPEN", "CLOSED"]),
+    rowVersion: z.number().int().positive(),
     createdAt: z.string(),
     // `closedAt` sengaja tidak divalidasi: kontrak menandainya opsional, dan
     // di bawah `exactOptionalPropertyTypes` field opsional pada Zod
@@ -143,6 +188,28 @@ export async function createPeriod(
           ...attempt.body,
           departmentCode: env.VITE_PRODUCTION_DEPARTMENT_CODE,
         },
+      }),
+    ),
+  );
+}
+
+/**
+ * Ubah kode/rentang buku OPEN. `expectedRowVersion` dari buku yang sedang
+ * dilihat: bila orang lain mengubahnya lebih dulu, server menolak
+ * `ROW_VERSION_CONFLICT` alih-alih menimpanya diam-diam.
+ */
+export async function updatePeriod(
+  periodId: string,
+  body: components["schemas"]["UpdatePayrollPeriodRequest"],
+  csrfToken: string,
+) {
+  return contract(
+    payrollPeriod,
+    unwrapApiData(
+      await apiClient.PATCH("/payroll-periods/{payrollPeriodId}", {
+        params: { path: { payrollPeriodId: periodId } },
+        headers: { "X-CSRF-Token": csrfToken },
+        body,
       }),
     ),
   );
@@ -407,8 +474,15 @@ export async function saveProductionBatched(
 
   let merged: BatchResult | null = null;
   let sent = 0;
-  for (const chunk of saveChunks(attempt)) {
-    const result = await saveProduction(chunk, csrfToken);
+  for (const [index, chunk] of saveChunks(attempt).entries()) {
+    let result: BatchResult;
+    try {
+      result = await saveProduction(chunk, csrfToken);
+    } catch (error) {
+      // Nothing committed yet: the caller's ordinary error handling applies.
+      if (!merged) throw error;
+      throw new PartialSaveError(merged, index, error);
+    }
     merged = merged ? mergeBatches(merged, result) : result;
     sent += chunk.rows.length;
     onProgress?.(sent, attempt.rows.length);
@@ -420,13 +494,47 @@ export async function saveProductionBatched(
 }
 
 export async function saveProduction(attempt: SaveAttempt, csrfToken: string) {
+  const data = unwrapApiData(
+    await apiClient.POST("/production-entry-batches", {
+      params: { header: { "Idempotency-Key": attempt.key } },
+      headers: { "X-CSRF-Token": csrfToken },
+      body: { rows: attempt.rows },
+    }),
+  );
+  const parsed = batch.safeParse(data);
+  if (!parsed.success) throw new BatchResponseShapeError();
+  // The checked body, except for the coerced row versions: everything else is
+  // passed through as the generated type describes it.
+  return {
+    ...data,
+    rows: data.rows.map((row, index) => {
+      const rowVersion = parsed.data.rows[index]?.rowVersion;
+      return rowVersion == null ? row : { ...row, rowVersion };
+    }),
+  };
+}
+
+/**
+ * Inline edit of one saved row (`PATCH /production-entries/{id}`).
+ *
+ * The batch endpoint matches rows by `(shiftStart, shiftEnd, stationNo)`, so
+ * a saved row whose shift moved would arrive there as a NEW row and leave the
+ * old one behind. Moving a shift therefore goes through this endpoint, which
+ * keeps the row's id and history, checks `expectedRowVersion`, and guards
+ * both the book it leaves and the book it lands in.
+ */
+export async function patchProduction(
+  productionEntryId: string,
+  body: components["schemas"]["ProductionEntryPatchRequest"],
+  csrfToken: string,
+) {
   return contract(
-    batch,
+    entry,
     unwrapApiData(
-      await apiClient.POST("/production-entry-batches", {
-        params: { header: { "Idempotency-Key": attempt.key } },
+      await apiClient.PATCH("/production-entries/{productionEntryId}", {
+        params: { path: { productionEntryId } },
         headers: { "X-CSRF-Token": csrfToken },
-        body: { rows: attempt.rows },
+        body,
       }),
     ),
   );

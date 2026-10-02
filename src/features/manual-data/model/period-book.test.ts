@@ -62,63 +62,100 @@ describe("periodWarning", () => {
 });
 
 describe("suggestNextPeriod", () => {
-  it("tanpa buku: bulan berjalan penuh", () => {
-    expect(suggestNextPeriod([], "2026-09-28", "KARUNG")).toEqual({
-      code: "KARUNG-2026-09",
-      periodStart: "2026-09-01",
-      periodEnd: "2026-09-30",
+  it("tanpa buku: siklus 24–23 yang mencakup hari ini", () => {
+    expect(suggestNextPeriod([], "2026-10-01", "KARUNG")).toEqual({
+      code: "KARUNG-2026-10",
+      periodStart: "2026-09-24",
+      periodEnd: "2026-10-23",
+    });
+    // Tanggal 23 masih siklus lama, tanggal 24 sudah siklus baru.
+    expect(suggestNextPeriod([], "2026-10-23", "KARUNG")).toMatchObject({
+      periodStart: "2026-09-24",
+      periodEnd: "2026-10-23",
+    });
+    expect(suggestNextPeriod([], "2026-10-24", "KARUNG")).toMatchObject({
+      periodStart: "2026-10-24",
+      periodEnd: "2026-11-23",
     });
   });
 
-  it("melanjutkan tepat setelah buku terakhir, bukan setelah bulan ini", () => {
-    expect(suggestNextPeriod([oct, sep], "2026-09-28", "KARUNG")).toEqual({
-      code: "KARUNG-2026-11",
-      periodStart: "2026-11-01",
-      periodEnd: "2026-11-30",
-    });
-  });
-
-  it("mengikuti siklus buku terakhir, bukan bulan kalender", () => {
-    const cycle = {
+  it("melanjutkan tepat setelah buku terakhir, bukan dari hari ini", () => {
+    const aug = {
       code: "KARUNG-2026-08",
+      periodStart: "2026-07-24",
+      periodEnd: "2026-08-23",
+    };
+    const sepCycle = {
+      code: "KARUNG-2026-09",
       periodStart: "2026-08-24",
       periodEnd: "2026-09-23",
     };
-    expect(suggestNextPeriod([cycle], "2026-09-28", "KARUNG")).toEqual({
+    expect(suggestNextPeriod([sepCycle, aug], "2026-08-01", "KARUNG")).toEqual({
+      code: "KARUNG-2026-10",
+      periodStart: "2026-09-24",
+      periodEnd: "2026-10-23",
+    });
+  });
+
+  it("buku terakhir di luar siklus: buku peralihan sampai tanggal 23, tanpa celah", () => {
+    expect(suggestNextPeriod([oct, sep], "2026-09-28", "KARUNG")).toEqual({
+      code: "KARUNG-2026-11",
+      periodStart: "2026-11-01",
+      periodEnd: "2026-11-23",
+    });
+  });
+
+  it("buku terakhir berakhir tanggal 22: mulai tanggal 23, berakhir 23 bulan berikutnya", () => {
+    const odd = {
+      code: "KARUNG-ODD",
+      periodStart: "2026-09-01",
+      periodEnd: "2026-10-22",
+    };
+    expect(suggestNextPeriod([odd], "2026-10-20", "KARUNG")).toMatchObject({
+      periodStart: "2026-10-23",
+      periodEnd: "2026-11-23",
+    });
+  });
+
+  it("tidak menyarankan kode yang sudah dipakai buku lain", () => {
+    const namedByStart = {
+      code: "KARUNG-2026-10",
+      periodStart: "2026-08-24",
+      periodEnd: "2026-09-23",
+    };
+    expect(suggestNextPeriod([namedByStart], "2026-09-28", "KARUNG")).toEqual({
       code: "KARUNG-2026-09",
       periodStart: "2026-09-24",
       periodEnd: "2026-10-23",
     });
-    // Mulai tanggal 31: bulan depan yang lebih pendek dipotong, tidak
-    // meloncat ke bulan berikutnya lagi.
-    const jan = {
-      code: "z",
-      periodStart: "2026-01-01",
-      periodEnd: "2026-01-30",
-    };
-    expect(suggestNextPeriod([jan], "2026-01-10", "KARUNG")).toMatchObject({
-      periodStart: "2026-01-31",
-      periodEnd: "2026-02-27",
-    });
+
+    const bothTaken = [
+      namedByStart,
+      {
+        code: "KARUNG-2026-09",
+        periodStart: "2025-01-01",
+        periodEnd: "2025-01-31",
+      },
+    ];
+    expect(suggestNextPeriod(bothTaken, "2026-09-28", "KARUNG").code).toBe(
+      "KARUNG-2026-10-2",
+    );
   });
 
-  it("menghitung akhir Februari kabisat dan pergantian tahun", () => {
-    const jan = {
-      code: "x",
-      periodStart: "2028-01-01",
-      periodEnd: "2028-01-31",
-    };
-    expect(suggestNextPeriod([jan], "2028-01-10", "KARUNG").periodEnd).toBe(
-      "2028-02-29",
-    );
+  it("melewati pergantian tahun", () => {
     const dec = {
-      code: "y",
-      periodStart: "2026-12-01",
-      periodEnd: "2026-12-31",
+      code: "KARUNG-2026-12",
+      periodStart: "2026-11-24",
+      periodEnd: "2026-12-23",
     };
-    expect(suggestNextPeriod([dec], "2026-12-10", "KARUNG")).toMatchObject({
+    expect(suggestNextPeriod([dec], "2026-12-10", "KARUNG")).toEqual({
       code: "KARUNG-2027-01",
-      periodEnd: "2027-01-31",
+      periodStart: "2026-12-24",
+      periodEnd: "2027-01-23",
+    });
+    expect(suggestNextPeriod([], "2027-01-05", "KARUNG")).toMatchObject({
+      periodStart: "2026-12-24",
+      periodEnd: "2027-01-23",
     });
   });
 });

@@ -2,25 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyOverrideMatrix,
-  defaultPayrollPeriod,
   formatRupiah,
   normalizeMoneyInput,
   parseOverrideMatrix,
 } from "./summary-draft";
 import { formatRupiahRate } from "../../../lib/format-money";
-
-describe("defaultPayrollPeriod", () => {
-  it("memilih periode tanggal 24 sampai 23 yang sedang berjalan", () => {
-    expect(defaultPayrollPeriod("2026-09-14")).toEqual({
-      periodStart: "2026-08-24",
-      periodEnd: "2026-09-23",
-    });
-    expect(defaultPayrollPeriod("2026-09-24")).toEqual({
-      periodStart: "2026-09-24",
-      periodEnd: "2026-10-23",
-    });
-  });
-});
 
 describe("normalizeMoneyInput", () => {
   it("menormalkan format Rupiah dari spreadsheet tanpa Number", () => {

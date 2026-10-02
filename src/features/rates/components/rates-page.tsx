@@ -12,6 +12,12 @@ import { CalculationPolicyEditor } from "./calculation-policy-editor";
 import { RateEditor } from "./rate-editor";
 import { RateVersionList } from "./rate-version-list";
 import { StationGroupManager } from "./station-group-manager";
+import {
+  PanelSkeleton,
+  TableSkeleton,
+} from "../../../components/skeleton/skeleton";
+import { EmptyState } from "../../../components/empty-state/empty-state";
+import { RatesEmptyBackdrop } from "./rates-empty-backdrop";
 
 type WorkspaceView = "rates" | "policy" | "stations";
 
@@ -107,7 +113,13 @@ export function RatesPage({
             Kelola harga per width dan anyaman tanpa mengubah payroll lama.
           </p>
         </div>
-        {canWrite && view === "rates" ? (
+        {/* Hidden while the list loads: without it the label cannot know whether this is the first version or a new one, and flips. */}
+        {/* Without any version the empty state below carries the one
+            "first version" button; this stays only to close an open form. */}
+        {canWrite &&
+        view === "rates" &&
+        !versionsQuery.isPending &&
+        (versions.length > 0 || creating) ? (
           <button
             type="button"
             className="min-h-8 border border-border-strong bg-surface px-3 text-xs font-semibold hover:bg-surface-muted focus-visible:outline-2 focus-visible:outline-focus disabled:text-disabled"
@@ -155,7 +167,8 @@ export function RatesPage({
         ))}
       </nav>
 
-      {view === "rates" ? (
+      {/* About editing prices that exist; with none yet it is noise. */}
+      {view === "rates" && versions.length > 0 ? (
         <div
           className="flex items-center gap-2 border border-success-border bg-success-soft px-3 py-2 text-xs text-success-strong"
           role="note"
@@ -189,7 +202,10 @@ export function RatesPage({
       ) : null}
 
       {view !== "stations" && versionsQuery.isPending ? (
-        <LoadingState label="Memuat riwayat harga…" />
+        <div className="grid min-h-0 gap-2 lg:grid-cols-[17rem_minmax(0,1fr)]">
+          <PanelSkeleton lines={6} className="min-h-72" />
+          <RateTableSkeleton label="Memuat riwayat harga" />
+        </div>
       ) : null}
       {view !== "stations" && versionsQuery.isError ? (
         <ErrorState
@@ -200,15 +216,34 @@ export function RatesPage({
       {view !== "stations" &&
       !versionsQuery.isPending &&
       !versionsQuery.isError &&
-      versions.length === 0 ? (
-        <section className="border border-border bg-surface p-6 text-center">
-          <h2 className="text-sm font-bold">Belum ada versi harga</h2>
-          <p className="mt-1 text-xs text-muted">
-            {canWrite
-              ? "Gunakan tombol Tambah konfigurasi harga untuk membuat versi pertama."
-              : "Minta pengguna dengan izin tulis membuat versi harga pertama."}
-          </p>
-        </section>
+      versions.length === 0 &&
+      !creating ? (
+        <EmptyState
+          id="rates-empty"
+          icon="rates"
+          title="Belum ada versi harga"
+          description="Payroll dihitung dari versi harga yang berlaku. Buat versi pertama berisi harga per width dan anyaman."
+          action={
+            canWrite ? (
+              <button
+                type="button"
+                className="empty-state-primary"
+                onClick={() => {
+                  changeView("rates");
+                  setCreating(true);
+                }}
+              >
+                Tambah konfigurasi harga
+              </button>
+            ) : (
+              <span className="empty-state-note">
+                Minta pengguna dengan izin tulis membuat versi harga pertama.
+              </span>
+            )
+          }
+          backdrop={<RatesEmptyBackdrop />}
+          fill
+        />
       ) : null}
 
       {view !== "stations" && versions.length > 0 ? (
@@ -223,7 +258,7 @@ export function RatesPage({
           />
           <div className="min-w-0">
             {view === "rates" && detailsQuery.isPending ? (
-              <LoadingState label="Memuat tabel harga…" />
+              <RateTableSkeleton label="Memuat tabel harga" />
             ) : null}
             {view === "rates" && detailsQuery.isError ? (
               <ErrorState
@@ -266,12 +301,16 @@ export function RatesPage({
   );
 }
 
-function LoadingState({ label }: { label: string }) {
+/** Matriks harga: kolom range width, lalu kolom per anyaman. */
+const RATE_COLUMNS = [16, 12, 12, 12, 12, 12, 12, 12];
+
+function RateTableSkeleton({ label }: { label: string }) {
   return (
-    <div
-      aria-busy="true"
-      aria-label={label}
-      className="h-32 animate-pulse border border-border bg-surface-muted"
+    <TableSkeleton
+      label={label}
+      height="26rem"
+      columns={RATE_COLUMNS}
+      align={["start", "end", "end", "end", "end", "end", "end", "end"]}
     />
   );
 }

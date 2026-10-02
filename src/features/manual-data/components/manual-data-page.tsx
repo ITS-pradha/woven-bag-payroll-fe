@@ -1,3 +1,4 @@
+import { useToast } from "../../../components/toast/use-toast";
 import { useConfirm } from "../../../components/confirm-dialog/use-confirm";
 import {
   lazy,
@@ -15,15 +16,18 @@ import { useBlocker } from "react-router-dom";
 import { env } from "../../../config/env";
 import { ApiClientError } from "../../../api/client/api-result";
 import {
+  BatchResponseShapeError,
+  PartialSaveError,
   closePeriod,
+  updatePeriod,
   createPeriod,
   getEmployee,
   lookupEmployees,
   getProduction,
   listPeriods,
   listProduction,
+  patchProduction,
   periodRange,
-  SAVE_BATCH_ROWS,
   saveProduction,
   saveProductionBatched,
   voidProduction,
@@ -42,6 +46,7 @@ import {
   type ImportSummary,
 } from "../model/import-stream";
 import {
+  ASSIGNEE_INVALID_MESSAGE,
   columns,
   entryCells,
   isChanged,
@@ -53,38 +58,61 @@ import {
   toJakartaInput,
   rowsWithValue,
   validateRows,
+  uniqueKeyOf,
+  DUPLICATE_KEY_MESSAGE,
   type Baseline,
   type DraftRow,
   type Entry,
   type Employee,
   type RowError,
+  ROW_FIELD,
+  serverFieldColumn,
 } from "../model/rows";
 import {
   periodWarning,
   periodWarningMessage,
+  rowsOutsideBook,
   suggestNextPeriod,
   type PeriodDraft,
 } from "../model/period-book";
 import { readLastPeriod, writeLastPeriod } from "../model/last-period";
 import { isXlsxFile } from "../model/xlsx-file";
 import { removeRowsFrom, shiftRows } from "../model/row-structure";
+import {
+  EmptyState,
+  GhostTable,
+} from "../../../components/empty-state/empty-state";
+import { AssigneeCellTrigger } from "./assignee-cell-trigger";
 import { DateCellPicker } from "./date-cell-picker";
 import { EmployeeCombobox } from "./employee-combobox";
 import { EmployeeDirectory } from "./employee-directory";
 import { EmployeePicker } from "./employee-picker";
 import type {
   AssigneeEditorAnchor,
-  DateCellAnchor,
+  CellAnchor,
+  EditedRows,
   GridControl,
   GridStatus,
 } from "./univer-grid";
 import { VoidProductionDialog } from "./void-production-dialog";
-import { ClosePeriodDialog, CreatePeriodDialog } from "./period-book-dialogs";
+import {
+  ClosePeriodDialog,
+  CreatePeriodDialog,
+  EditPeriodDialog,
+} from "./period-book-dialogs";
+import { ToolbarMenu } from "./toolbar-menu";
 import {
   ImportProgressDialog,
   type ImportProgressState,
   type ImportStage,
 } from "./import-progress-dialog";
+import {
+  GridSkeleton,
+  WorkspaceSkeleton,
+  type LoadStage,
+} from "./workspace-skeleton";
+import { SaveProgress, type SaveRun } from "./save-progress";
+import { formatSaveTime } from "../model/save-time";
 import "./manual-data.css";
 
 const Grid = lazy(() =>
@@ -112,6 +140,35 @@ function nextFrame() {
   );
 }
 
+/**
+ * Rows handled per slice of a long paste or import, between yields to the
+ * browser. Measured: one 100.000-row paste done in a single task blocked the
+ * tab for 4,4 s; at 5.000 rows a slice of validation or reading stays within
+ * a few tens of milliseconds.
+ */
+const SLICE_ROWS = 5_000;
+
+/**
+ * Gives the browser a turn between slices: input, paint, the progress bar.
+ * `scheduler.yield` where the browser has it, otherwise a message-channel
+ * task — not `setTimeout(0)`, which nested calls clamp to 4 ms each.
+ */
+function yieldToMain(): Promise<void> {
+  const scheduler: { yield?: () => Promise<void> } | undefined = Reflect.get(
+    globalThis,
+    "scheduler",
+  );
+  if (typeof scheduler?.yield === "function") return scheduler.yield();
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      resolve();
+    };
+    channel.port2.postMessage(null);
+  });
+}
+
 function formatBytes(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
@@ -129,6 +186,51 @@ function formatBytes(size: number) {
 function gridRowLabel(row: number) {
   return (row + 1).toLocaleString("id-ID");
 }
+
+/**
+ * The save receipt's "first rejected row" after rows moved under it, so its
+ * jump button keeps pointing at the row that was rejected.
+ */
+function moveRejectedRow(
+  run: SaveRun | null,
+  move: (rows: { row: number }[]) => { row: number }[],
+): SaveRun | null {
+  if (run?.phase !== "done" || run.firstRejectedRow === null) return run;
+  const row = move([{ row: run.firstRejectedRow }])[0]?.row ?? null;
+  return row === run.firstRejectedRow ? run : { ...run, firstRejectedRow: row };
+}
+
+/**
+ * Whether a failed write may still have been applied — the request has to
+ * be repeated with the same key, never re-sent as a new one.
+ *
+ * Network failures and 5xx, 408 and 429 never said no. IMPORT_IN_PROGRESS is
+ * a 409 that means "still running", not "refused". A response that answered
+ * but broke the contract is definitive: replaying the key replays the same
+ * broken body.
+ */
+function isUnknownOutcome(error: unknown) {
+  if (error instanceof BatchResponseShapeError) return false;
+  if (!(error instanceof ApiClientError)) return true;
+  if (error.code === "IMPORT_IN_PROGRESS") return true;
+  return error.status >= 500 || [408, 429].includes(error.status);
+}
+
+/** Stable empty list, so a row without problems never looks "changed". */
+const NO_ERRORS: readonly RowError[] = [];
+
+/**
+ * Distinct values listed under one cause, most frequent first. 10.000
+ * different bad timestamps rendered 10.000 fix forms; past the first few
+ * the list stops being a tool and is only paint.
+ */
+const FIX_VALUES_SHOWN = 20;
+
+/**
+ * Above this many edited rows a prune re-validates the whole sheet in one
+ * pass instead of row by row (a fill or a cleared column).
+ */
+const PRUNE_ROWS_ONE_BY_ONE = 2_000;
 
 /** A column plus the exact value in it — the unit a bulk fix applies to. */
 function fixKey(field: string, value: string) {
@@ -177,7 +279,7 @@ export function ManualDataPage({
   };
   const [cursors, setCursors] = useState<(string | undefined)[]>([]);
   const [generation, setGeneration] = useState(0);
-  const [pageNotice, setPageNotice] = useState("");
+  const toast = useToast();
   const [navigationState, setNavigationState] = useState({
     dirty: false,
     busy: false,
@@ -214,6 +316,16 @@ export function ManualDataPage({
       null
     );
   }, [periods.data, periodId]);
+  /*
+    Buku turunan DIPAKU begitu terpilih. Tanpa itu, "Buat buku" yang
+    menyegarkan daftar bisa membuat turunannya pindah ke buku baru yang
+    mencakup hari ini — kunci Workspace berubah, grid di-remount, dan draft
+    yang belum disimpan hilang tanpa satu pertanyaan pun. Disetel saat render
+    (bukan effect) supaya tidak ada satu render pun dengan buku yang salah.
+    Tidak ditulis ke ingatan "buku terakhir": itu hanya untuk pilihan user.
+  */
+  if (selectedPeriod && periodId !== selectedPeriod.id)
+    setPeriodId(selectedPeriod.id);
   const activeFilter: ProductionFilter | null = useMemo(
     () =>
       selectedPeriod ? { ...filter, ...periodRange(selectedPeriod) } : null,
@@ -226,6 +338,13 @@ export function ManualDataPage({
     enabled: activeFilter !== null,
     queryFn: ({ signal }) => listProduction(activeFilter!, signal),
     staleTime: Infinity,
+    // Dibuang begitu tidak ada yang menampilkannya. `generation` mulai dari 0
+    // lagi setiap halaman ini dibuka, jadi kunci ["production", buku, 0] yang
+    // tersisa di cache adalah isi server SEBELUM Simpan: admin menyimpan,
+    // pindah ke Detail, kembali, dan grid kosong sampai halaman di-refresh.
+    // Staleness tak terbatas tetap berlaku selama halaman terbuka — grid yang
+    // sedang diedit tidak boleh tergantikan diam-diam oleh refetch.
+    gcTime: 0,
     refetchOnWindowFocus: false,
     retry: false,
   });
@@ -261,6 +380,7 @@ export function ManualDataPage({
     initial: PeriodDraft;
   } | null>(null);
   const [closeTarget, setCloseTarget] = useState<PayrollPeriod | null>(null);
+  const [editTarget, setEditTarget] = useState<PayrollPeriod | null>(null);
   const createBook = useMutation({
     mutationFn: (attempt: { key: string; draft: PeriodDraft }) =>
       createPeriod({ key: attempt.key, body: attempt.draft }, csrfToken),
@@ -271,14 +391,47 @@ export function ManualDataPage({
       // membuangnya diam-diam demi buku yang baru dibuat bukan pertukaran
       // yang boleh diputuskan layar ini sendiri.
       if (navigationState.dirty) {
-        setPageNotice(
-          `Buku ${created.code} dibuat. Simpan draft dulu, lalu pilih bukunya dari daftar.`,
-        );
+        toast({
+          tone: "info",
+          title: `Buku ${created.code} dibuat`,
+          message: "Simpan draft dulu, lalu pilih bukunya dari daftar.",
+        });
       } else {
         openPeriod(created.id);
         setCursors([]);
-        setPageNotice(`Buku ${created.code} dibuat dan dibuka.`);
+        toast({ message: `Buku ${created.code} dibuat dan dibuka.` });
       }
+    },
+  });
+  const editBook = useMutation({
+    mutationFn: ({
+      period,
+      draft,
+    }: {
+      period: PayrollPeriod;
+      draft: PeriodDraft;
+    }) =>
+      updatePeriod(
+        period.id,
+        { expectedRowVersion: period.rowVersion, ...draft },
+        csrfToken,
+      ),
+    onSuccess: async (updated) => {
+      setEditTarget(null);
+      await queryClient.invalidateQueries({ queryKey: ["payroll-periods"] });
+      toast({
+        title: `Buku ${updated.code} diperbarui`,
+        message: `Rentang ${periodRangeLabel(updated.periodStart, updated.periodEnd)}.`,
+      });
+    },
+    onError: (error) => {
+      // Versi di layar sudah usang: segarkan daftar supaya percobaan
+      // berikutnya memakai versi terbaru, bukan menimpa perubahan orang lain.
+      if (
+        error instanceof ApiClientError &&
+        error.code === "ROW_VERSION_CONFLICT"
+      )
+        void queryClient.invalidateQueries({ queryKey: ["payroll-periods"] });
     },
   });
   const closeBook = useMutation({
@@ -286,7 +439,7 @@ export function ManualDataPage({
     onSuccess: async (closed) => {
       setCloseTarget(null);
       await queryClient.invalidateQueries({ queryKey: ["payroll-periods"] });
-      setPageNotice(`Buku ${closed.code} sudah ditutup.`);
+      toast({ message: `Buku ${closed.code} sudah ditutup.` });
     },
   });
   const openCreate = () => {
@@ -318,12 +471,20 @@ export function ManualDataPage({
           while (next < pins.length) {
             const pin = pins[next++];
             if (!pin || signal.aborted) return;
-            const employee = await queryClient.fetchQuery({
-              queryKey: ["employee", pin],
-              queryFn: () => getEmployee(pin, signal),
-              staleTime: 300_000,
-            });
-            names.set(pin, `${employee.fullName} · ${pin}`);
+            // One PIN HRIS cannot answer for (resigned, not synced, a
+            // timeout) must not hold the whole workspace hostage: that row
+            // shows its raw PIN — `entryCells` falls back to it — and still
+            // saves, because the server resolves PINs itself.
+            try {
+              const employee = await queryClient.fetchQuery({
+                queryKey: ["employee", pin],
+                queryFn: () => getEmployee(pin, signal),
+                staleTime: 300_000,
+              });
+              names.set(pin, `${employee.fullName} · ${pin}`);
+            } catch (error) {
+              if (signal.aborted) throw error;
+            }
           }
         }),
       );
@@ -331,6 +492,15 @@ export function ManualDataPage({
     },
   });
   const workspaceShown = Boolean(production.data && employees.data);
+  const noBooks = periods.isSuccess && (periods.data?.data.length ?? 0) === 0;
+  /** Tahap yang sedang ditunggu sebelum grid bisa tampil; null = tidak memuat. */
+  const loadStage: LoadStage | null = periods.isPending
+    ? "periods"
+    : activeFilter !== null && production.isPending
+      ? "production"
+      : production.isSuccess && employees.isPending
+        ? "employees"
+        : null;
   const pageControls = (
     <div className="manual-page-controls">
       {env.VITE_ENABLE_API_MOCKING && (
@@ -358,10 +528,31 @@ export function ManualDataPage({
                   Buat buku
                 </button>
               )}
+              {canCreateBook && selectedPeriod?.status === "OPEN" && (
+                <button
+                  type="button"
+                  className="manual-btn"
+                  // Rentang baru memuat ulang grid; draft yang belum disimpan
+                  // akan hilang bersama rentang lama.
+                  disabled={navigationState.busy || navigationState.dirty}
+                  title={
+                    navigationState.dirty
+                      ? "Simpan atau batalkan draft dulu sebelum mengubah buku."
+                      : undefined
+                  }
+                  onClick={() => {
+                    editBook.reset();
+                    setEditTarget(selectedPeriod);
+                  }}
+                >
+                  Ubah buku
+                </button>
+              )}
               {canCloseBook && selectedPeriod?.status === "OPEN" && (
                 <button
                   type="button"
-                  className="manual-btn manual-danger-quiet"
+                  // Set apart from Buat/Ubah: closing a book cannot be undone.
+                  className="manual-btn manual-danger-quiet manual-period-close"
                   disabled={navigationState.busy}
                   onClick={() => {
                     closeBook.reset();
@@ -419,7 +610,9 @@ export function ManualDataPage({
           fallback for the states that have no grid — loading, no book yet,
           a failed load — so the book picker is never out of reach.
         */}
-        {!workspaceShown && pageControls}
+        {/* Tanpa buku, pemilih kosong dan kolom cari tidak punya apa pun
+            untuk dicari; satu-satunya langkah ada di empty state di bawah. */}
+        {!workspaceShown && !loadStage && !noBooks && pageControls}
       </header>
       <CreatePeriodDialog
         initial={createDraft?.initial ?? null}
@@ -431,6 +624,15 @@ export function ManualDataPage({
           createDraft && createBook.mutate({ key: createDraft.key, draft })
         }
       />
+      <EditPeriodDialog
+        period={editTarget}
+        pending={editBook.isPending}
+        error={editBook.error ? periodErrorMessage(editBook.error) : ""}
+        onCancel={() => setEditTarget(null)}
+        onConfirm={(draft) =>
+          editTarget && editBook.mutate({ period: editTarget, draft })
+        }
+      />
       <ClosePeriodDialog
         period={closeTarget}
         hasDraft={navigationState.dirty}
@@ -439,9 +641,6 @@ export function ManualDataPage({
         onCancel={() => setCloseTarget(null)}
         onConfirm={() => closeTarget && closeBook.mutate(closeTarget)}
       />
-      <div role="status" className="manual-status">
-        {pageNotice}
-      </div>
       {periods.isError && (
         <div role="alert" className="manual-error">
           <strong>Daftar buku periode belum dapat dimuat.</strong>
@@ -457,36 +656,47 @@ export function ManualDataPage({
         tercakup buku. Jadi ini bukan "data kosong", ini langkah yang belum
         dikerjakan, dan pesannya menyebut langkahnya.
       */}
-      {periods.isSuccess && (periods.data?.data.length ?? 0) === 0 && (
-        <div role="alert" className="manual-error">
-          <strong>Belum ada buku periode.</strong>
-          <p>
-            Produksi dicatat per buku periode; sebelum ada buku tidak ada baris
-            yang bisa dimuat atau disimpan.{" "}
-            {canCreateBook
-              ? "Buat buku pertama lewat tombol di bawah."
-              : "Minta HRD membuat periodenya dulu."}
-          </p>
-          {canCreateBook && (
-            <button
-              type="button"
-              className="manual-btn manual-primary"
-              onClick={openCreate}
-            >
-              Buat buku pertama
-            </button>
-          )}
-        </div>
+      {noBooks && (
+        <EmptyState
+          id="manual-first-book"
+          icon="book"
+          title="Belum ada buku periode"
+          description="Produksi dicatat per buku periode; sebelum ada buku tidak ada baris yang bisa dimuat atau disimpan."
+          action={
+            canCreateBook ? (
+              <button
+                type="button"
+                className="empty-state-primary"
+                onClick={openCreate}
+              >
+                Buat buku pertama
+              </button>
+            ) : (
+              <span className="empty-state-note">
+                Minta HRD membuat periodenya dulu.
+              </span>
+            )
+          }
+          // The sheet it will become: row numbers down the side and the
+          // real column titles along the top.
+          backdrop={
+            <GhostTable
+              columns={[4, 16, 16, 6, 20, 8, 8, 8]}
+              head={["Pilih", ...columns]}
+              gutter
+              rows={24}
+            />
+          }
+          fill
+        />
       )}
       {bookWarning && (
         <p role="status" className="manual-period-warning">
           {periodWarningMessage(bookWarning)}
         </p>
       )}
-      {activeFilter !== null && production.isPending && (
-        <p role="status" className="manual-notice">
-          Memuat data produksi…
-        </p>
+      {loadStage && (
+        <WorkspaceSkeleton stage={loadStage} controls={pageControls} />
       )}
       {production.isError && (
         <div role="alert" className="manual-error">
@@ -499,9 +709,6 @@ export function ManualDataPage({
             Coba lagi
           </button>
         </div>
-      )}
-      {production.isSuccess && employees.isPending && (
-        <p role="status">Memuat nama karyawan…</p>
       )}
       {employees.isError && (
         <div role="alert" className="manual-error">
@@ -518,6 +725,7 @@ export function ManualDataPage({
         <Workspace
           key={`${JSON.stringify(activeFilter)}-${generation}`}
           controls={pageControls}
+          book={selectedPeriod}
           entries={production.data.data}
           names={employees.data}
           canWrite={canWrite && !periodClosed}
@@ -525,7 +733,7 @@ export function ManualDataPage({
           csrfToken={csrfToken}
           onNavigationState={setNavigationState}
           onReload={(message) => {
-            setPageNotice(message ?? "");
+            if (message) toast({ message });
             setGeneration((value) => value + 1);
           }}
           onNext={
@@ -606,6 +814,8 @@ function periodErrorMessage(error: Error) {
     return `${error.message}. Selesaikan (kunci atau batalkan) payroll run-nya di Summary dulu.`;
   if (error.code === "PERMISSION_DENIED")
     return "Akun ini tidak berhak melakukan aksi ini pada buku periode.";
+  if (error.code === "ROW_VERSION_CONFLICT")
+    return "Buku ini baru saja diubah pengguna lain. Tutup dialog ini lalu buka Ubah buku lagi untuk melihat versi terbaru.";
   return error.message;
 }
 
@@ -756,7 +966,7 @@ function ManualFilters({
   list pushed the fix fields off screen and gave the page a scrollbar inside a
   scrollbar. One at a time, switched by a tab strip.
 */
-type SideTab = "errors" | "directory" | "editor";
+type SideTab = "errors" | "directory" | "editor" | "paste";
 
 interface WorkspaceProps {
   onNavigationState(state: { dirty: boolean; busy: boolean }): void;
@@ -778,8 +988,11 @@ interface WorkspaceProps {
   onPageSize(size: number): void;
   /** Book picker and filters, placed at the top of the right-hand column. */
   controls: ReactNode;
+  /** Buku yang sedang dibuka; baris bertanggal di luarnya diberi tanda kuning. */
+  book: PayrollPeriod | null;
 }
 function Workspace({
+  book,
   entries,
   names,
   canWrite,
@@ -830,11 +1043,20 @@ function Workspace({
    * thousands of freshly imported ones are still waiting to be checked.
    */
   const [importedUnsaved, setImportedUnsaved] = useState(false);
+  /**
+   * Impor file terakhir yang belum disimpan, cukup untuk mengembalikan rentang
+   * yang ditimpanya. Impor menulis mulai baris draft kosong pertama, tapi
+   * rentangnya bisa melewati baris yang sudah berisi (draft atau tersimpan),
+   * jadi yang dicatat adalah isi SEBELUM impor, bukan sekadar "hapus baris".
+   * Dibuang begitu posisinya tidak lagi bisa dipercaya: baris disisipkan atau
+   * dihapus di atas/di dalam rentang, atau draft sudah disimpan semua.
+   */
+  const [lastImport, setLastImport] = useState<ImportUndo | null>(null);
   /** Replacement typed for each distinct bad value, keyed by column + value. */
   const [fixes, setFixes] = useState<Record<string, string>>({});
   const [assigneeAnchor, setAssigneeAnchor] =
     useState<AssigneeEditorAnchor | null>(null);
-  const [dateAnchor, setDateAnchor] = useState<DateCellAnchor | null>(null);
+  const [cellAnchor, setCellAnchor] = useState<CellAnchor | null>(null);
   const [focusRequest, setFocusRequest] = useState(0);
   const [notice, setNoticeText] = useState("");
   /**
@@ -847,21 +1069,126 @@ function Workspace({
    * handful of real failures call `failNotice`.
    */
   const [noticeFailed, setNoticeFailed] = useState(false);
+  /**
+   * A failure that is about the red cells, worded from how many are left.
+   *
+   * "1 sel perlu diperbaiki" used to be frozen text: the admin fixed the cell,
+   * the red mark and the problem list went, and the banner kept shouting. Tied
+   * to the live error count, it counts down with each fix and turns into the
+   * next step once none are left.
+   */
+  const [cellNotice, setCellNotice] = useState<{
+    build: (count: number) => string;
+    /**
+     * `info`: rows landed and only some cells need work (an import, a paste)
+     * — said plainly, with the count in the "perlu diperbaiki" strip below.
+     * `danger`: something was refused (Simpan) and nothing was sent.
+     */
+    tone: "info" | "danger";
+  } | null>(null);
+  /**
+   * The save in progress, or the receipt of the last one. It takes the
+   * notice's place: any other message replaces it, the same as any message
+   * replaces the one before.
+   */
+  const [saveRun, setSaveRun] = useState<SaveRun | null>(null);
+  /** When the last Simpan landed, for the draft status once nothing is pending. */
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const setNotice = (message: string) => {
     setNoticeText(message);
     setNoticeFailed(false);
+    setCellNotice(null);
+    setSaveRun(null);
   };
   const failNotice = (message: string) => {
     setNoticeText(message);
     setNoticeFailed(true);
+    setCellNotice(null);
+    setSaveRun(null);
+  };
+  const failCellNotice = (
+    build: (count: number) => string,
+    tone: "info" | "danger" = "danger",
+  ) => {
+    setNoticeText("");
+    setNoticeFailed(tone === "danger");
+    setCellNotice({ build, tone });
+    setSaveRun(null);
+  };
+  const showSaveRun = (run: SaveRun) => {
+    setNotice("");
+    setSaveRun(run);
   };
   const [errors, setErrors] = useState<RowError[]>([]);
+  /**
+   * Rows whose Shift Start falls outside the open book. A warning, not an
+   * error: the server books each row by its own date, so these save into the
+   * book that covers them — or are refused when none is open. Either way the
+   * admin should see it before Simpan, since a mistyped month otherwise looks
+   * like ordinary data.
+   */
+  const [outside, setOutside] = useState<{ row: number; date: string }[]>([]);
+  /** Replaces the list, keeping the same array when nothing moved. */
+  const showOutside = useCallback(
+    (next: { row: number; date: string }[]) =>
+      setOutside((current) =>
+        current.length === next.length &&
+        current.every(
+          (item, index) =>
+            item.row === next[index]!.row && item.date === next[index]!.date,
+        )
+          ? current
+          : next,
+      ),
+    [],
+  );
+  const refreshOutside = useCallback(() => {
+    if (!control || !book) return;
+    showOutside(rowsOutsideBook(control.read(), book));
+  }, [control, book, showOutside]);
+  useEffect(refreshOutside, [refreshOutside]);
+  /**
+   * Re-checks only these sheet rows. A typed cell used to re-read all
+   * 100.000 rows for this one warning.
+   */
+  function refreshOutsideRows(rows: readonly number[]) {
+    if (!control || !book || !rows.length) return;
+    const edited = new Set(rows);
+    const found = rows.flatMap((sheetRow) => {
+      const draft = control.readRow(sheetRow);
+      return draft
+        ? rowsOutsideBook([draft], book).map((item) => ({
+            ...item,
+            row: sheetRow,
+          }))
+        : [];
+    });
+    setOutside((current) => {
+      const kept = current.filter((item) => !edited.has(item.row));
+      if (kept.length === current.length && !found.length) return current;
+      return [...kept, ...found].sort((a, b) => a.row - b.row);
+    });
+  }
+  const shownNotice = cellNotice
+    ? errors.length
+      ? cellNotice.build(errors.length)
+      : "Semua sel yang bermasalah sudah diperbaiki. Klik Simpan untuk mengirim ke server."
+    : notice;
+  const shownFailed = cellNotice
+    ? cellNotice.tone === "danger" && errors.length > 0
+    : noticeFailed;
   const [clipboard, setClipboard] = useState<string | null>(null);
   /** Nama file ketika isi preview datang dari impor, bukan dari clipboard. */
   const importInput = useRef<HTMLInputElement>(null);
   /** Impor langsung ke server untuk file yang tidak muat di workspace. */
   const [bulkImport, setBulkImport] = useState<{
     file: File;
+    /**
+     * Satu kunci per file yang dipilih, dipakai ulang oleh setiap "Mulai"
+     * berikutnya: batch yang sudah tersimpan diputar ulang server, bukan
+     * ditulis dua kali (`importProductionStream` menurunkan kunci batch).
+     */
+    key: string;
     running: boolean;
     progress: ImportProgress | null;
     summary: ImportSummary | null;
@@ -869,6 +1196,11 @@ function Workspace({
   } | null>(null);
   const bulkAbort = useRef<AbortController | null>(null);
   const [pasteTarget, setPasteTarget] = useState({ row: 1, column: 1 });
+  /** "Tambah [1000] baris lagi di bawah", as in a spreadsheet. */
+  const [addRowCount, setAddRowCount] = useState(1000);
+  /** Simpan is sending the saved rows whose shift moved, one PATCH each. */
+  const [movingShifts, setMovingShifts] = useState(false);
+  const pastePanel = useRef<HTMLElement>(null);
   const [attempt, setAttempt] = useState<SaveAttempt | null>(null);
   const [voidTarget, setVoidTarget] = useState<Baseline | null>(null);
   const [voidAttempt, setVoidAttempt] = useState<VoidAttempt | null>(null);
@@ -888,8 +1220,10 @@ function Workspace({
   const mutation = useMutation({
     mutationFn: (pending: SaveAttempt) =>
       saveProductionBatched(pending, csrfToken, (sent, total) =>
-        setNotice(
-          `Menyimpan… ${sent.toLocaleString("id-ID")} dari ${total.toLocaleString("id-ID")} baris terkirim.`,
+        setSaveRun((run) =>
+          run?.phase === "running"
+            ? { ...run, step: "send", sent, total }
+            : run,
         ),
       ),
   });
@@ -933,13 +1267,26 @@ function Workspace({
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [status.dirty, attempt, voidAttempt, voidMutation.isPending]);
+  const saving = saveRun?.phase === "running";
+  // `saving` covers the check before anything is sent: the HRIS lookup writes
+  // the resolved names back into the sheet, and an edit typed meanwhile would
+  // race it.
   const busy =
+    saving ||
     mutation.isPending ||
     attempt !== null ||
     resolvingPaste ||
     voidMutation.isPending ||
-    voidAttempt !== null;
+    voidAttempt !== null ||
+    movingShifts;
   const canEdit = canWrite && !busy;
+  const draftState = status.dirty
+    ? "Ada draft belum disimpan"
+    : saving
+      ? "Menyimpan…"
+      : lastSavedAt
+        ? `Tersimpan pukul ${formatSaveTime(lastSavedAt)}`
+        : "Tidak ada perubahan";
   useEffect(() => {
     onNavigationState({ dirty: status.dirty, busy });
   }, [status.dirty, busy, onNavigationState]);
@@ -947,8 +1294,31 @@ function Workspace({
     setAssigneeAnchor(anchor);
     if (anchor) setFocusRequest((value) => value + 1);
   }, []);
-  const requestDateCell = useCallback(
-    (anchor: DateCellAnchor | null) => setDateAnchor(anchor),
+  const gridShell = useRef<HTMLDivElement>(null);
+  /**
+   * The list opened from the in-cell button hangs under that cell, its right
+   * edge on the button — kept inside the grid so it never runs off the pane.
+   */
+  function assigneeBelow(anchor: CellAnchor): AssigneeEditorAnchor {
+    const width = gridShell.current?.clientWidth ?? 0;
+    const height = gridShell.current?.clientHeight ?? 0;
+    const popoverWidth = 356;
+    const popoverHeight = 320;
+    const below = anchor.top + anchor.height + 4;
+    return {
+      row: anchor.row,
+      left: Math.max(
+        4,
+        Math.min(anchor.left - popoverWidth, width - popoverWidth),
+      ),
+      top:
+        height && below + popoverHeight > height
+          ? Math.max(4, anchor.top - popoverHeight - 4)
+          : below,
+    };
+  }
+  const requestCellTrigger = useCallback(
+    (anchor: CellAnchor | null) => setCellAnchor(anchor),
     [],
   );
   /**
@@ -957,13 +1327,13 @@ function Workspace({
    * rAF-debounced and a stale snapshot would clobber a neighbouring edit.
    */
   function applyDateCell(value: string) {
-    if (!control || !dateAnchor || !canEdit) return;
-    const cells = control.readRow(dateAnchor.row)?.cells;
+    if (!control || !cellAnchor || !canEdit) return;
+    const cells = control.readRow(cellAnchor.row)?.cells;
     if (!cells) return;
     const next = [...cells];
-    next[dateAnchor.column - 1] = value;
-    control.write(dateAnchor.row, next);
-    setDateAnchor({ ...dateAnchor, value });
+    next[cellAnchor.column - 1] = value;
+    control.write(cellAnchor.row, next);
+    setCellAnchor({ ...cellAnchor, value });
   }
   // The sheet shows WHERE the problems are; the strip and the summary below
   // say WHAT they are. Re-marking on every change also clears stale marks when
@@ -979,13 +1349,31 @@ function Workspace({
           (columns as readonly string[]).indexOf(error.field) + 1,
         ),
       })),
+      outside.map((item) => ({ row: item.row, column: 1 })),
     );
-  }, [control, errors]);
+  }, [control, errors, outside]);
   useEffect(() => {
-    if (!status.dirty) setImportedUnsaved(false);
+    if (status.dirty) return;
+    setImportedUnsaved(false);
+    setLastImport(null);
   }, [status.dirty]);
   const showEditor = editorOpen && !importedUnsaved;
-  const activeErrors = errors.filter((error) => error.row === status.active);
+  /**
+   * The problems per row. Every derivation below used to be recomputed from
+   * the whole list on each render — and the status line re-renders the page
+   * on every cursor move: with 10.000 problems that was a scan of all of
+   * them per arrow key. Now it is one pass per change of the list.
+   */
+  const errorsByRow = useMemo(() => {
+    const byRow = new Map<number, RowError[]>();
+    for (const error of errors) {
+      const list = byRow.get(error.row);
+      if (list) list.push(error);
+      else byRow.set(error.row, [error]);
+    }
+    return byRow;
+  }, [errors]);
+  const activeErrors = errorsByRow.get(status.active) ?? NO_ERRORS;
   /** Distinct problems, so 27,000 cells read as the handful of causes they are. */
   /**
    * Causes, each carrying the distinct values that produced it.
@@ -1004,6 +1392,8 @@ function Workspace({
   };
   type ErrorGroup = {
     message: string;
+    /** Column of the first error with this cause, to name it in the list. */
+    field: string;
     count: number;
     firstRow: number;
     /** Every row this cause touches, for deleting the whole cause at once. */
@@ -1023,6 +1413,9 @@ function Workspace({
       ? [{ id: "directory" as const, label: "Data karyawan" }]
       : []),
     ...(showEditor ? [{ id: "editor" as const, label: "Editor baris" }] : []),
+    ...(clipboard !== null
+      ? [{ id: "paste" as const, label: "Preview paste" }]
+      : []),
   ];
   // Derived, not stored: a panel can disappear under the tab that is showing
   // it (errors all fixed, editor hidden by an import), and falling back here
@@ -1038,42 +1431,72 @@ function Workspace({
           hidden: activeSide !== id,
         }
       : {};
-  const errorGroups = [
-    ...errors
-      .reduce((groups, error) => {
-        const found = groups.get(error.message) ?? {
-          message: error.message,
-          count: 0,
-          firstRow: error.row,
-          rows: new Set<number>(),
-          values: new Map<string, FixValue>(),
-        };
-        found.count += 1;
-        found.rows.add(error.row);
-        if (error.value) {
-          const key = fixKey(error.field, error.value);
-          const seen = found.values.get(key);
-          if (seen) seen.count += 1;
-          else
-            found.values.set(key, {
-              key,
+  const errorGroups = useMemo(
+    () =>
+      [
+        ...errors
+          .reduce((groups, error) => {
+            const found = groups.get(error.message) ?? {
+              message: error.message,
               field: error.field,
-              value: error.value,
-              count: 1,
+              count: 0,
               firstRow: error.row,
-            });
-        }
-        groups.set(error.message, found);
-        return groups;
-      }, new Map<string, ErrorGroup>())
-      .values(),
-  ]
-    .map((group) => ({
-      ...group,
-      values: [...group.values.values()].sort((a, b) => b.count - a.count),
-    }))
-    .sort((a, b) => b.count - a.count);
+              rows: new Set<number>(),
+              values: new Map<string, FixValue>(),
+            };
+            found.count += 1;
+            found.rows.add(error.row);
+            if (error.value) {
+              const key = fixKey(error.field, error.value);
+              const seen = found.values.get(key);
+              if (seen) seen.count += 1;
+              else
+                found.values.set(key, {
+                  key,
+                  field: error.field,
+                  value: error.value,
+                  count: 1,
+                  firstRow: error.row,
+                });
+            }
+            groups.set(error.message, found);
+            return groups;
+          }, new Map<string, ErrorGroup>())
+          .values(),
+      ]
+        .map((group) => ({
+          ...group,
+          values: [...group.values.values()].sort((a, b) => b.count - a.count),
+        }))
+        .sort((a, b) => b.count - a.count),
+    [errors],
+  );
   const row = control?.readRow(status.active);
+  /** Rows with at least one problem, in sheet order, for ‹ › stepping. */
+  const errorRows = useMemo(
+    () => [...errorsByRow.keys()].sort((a, b) => a - b),
+    [errorsByRow],
+  );
+  const [errorCursor, setErrorCursor] = useState(0);
+  const cursorAt = Math.min(errorCursor, Math.max(0, errorRows.length - 1));
+  const cursorRow = errorRows[cursorAt];
+  const cursorError =
+    cursorRow === undefined ? undefined : errorsByRow.get(cursorRow)?.[0];
+  const stepError = (delta: number) => {
+    if (!errorRows.length) return;
+    const next = (cursorAt + delta + errorRows.length) % errorRows.length;
+    setErrorCursor(next);
+    const target = errorRows[next];
+    if (target !== undefined) control?.select(target);
+  };
+  /** "ST 51 · Operator Contoh · 8954": who to ask about a row. */
+  const rowContext = (sheetRow: number) => {
+    const cells = control?.readRow(sheetRow)?.cells;
+    if (!cells) return "";
+    return [cells[2] ? `ST ${cells[2]}` : "", cells[3] ?? ""]
+      .filter(Boolean)
+      .join(" · ");
+  };
   /**
    * Turns whatever sits in the assignee cells into labels the grid knows.
    *
@@ -1124,15 +1547,246 @@ function Workspace({
   }
   /** Specific reasons win: the generic message would only bury them. */
   function mergeErrors(specific: RowError[], generic: RowError[]) {
+    // A set, not `some` per error: two 10.000-error lists were a hundred
+    // million comparisons.
+    const taken = new Set(
+      specific.map((found) => `${found.row}|${found.field}`),
+    );
     return [
       ...specific,
-      ...generic.filter(
-        (error) =>
-          !specific.some(
-            (found) => found.row === error.row && found.field === error.field,
-          ),
-      ),
+      ...generic.filter((error) => !taken.has(`${error.row}|${error.field}`)),
     ];
+  }
+  /**
+   * Drops the problems an edit has fixed, a moment after the typing stops —
+   * the red cell and its line in the problem list go as soon as the value is
+   * right, not at the next Simpan.
+   *
+   * Only ever REMOVES: a half-typed value is not a problem worth shouting
+   * about, and new problems keep surfacing where they always have, at Simpan.
+   * Local rules are re-run for the whole sheet because some span rows — a
+   * duplicate shift is fixed by editing the OTHER row. An HRIS lookup failure
+   * cannot be re-checked locally, so it stays while its cell still holds the
+   * value that failed.
+   */
+  const pruneTimer = useRef(0);
+  /**
+   * Sheet rows edited since the last prune; `all` after a change that moved
+   * rows around, or touched too many to be worth re-checking one by one.
+   */
+  const pendingEdits = useRef<{ all: boolean; rows: Set<number> }>({
+    all: false,
+    rows: new Set(),
+  });
+  /**
+   * Every row's unique key and the rows holding each key, kept between
+   * prunes so a duplicate can be re-checked from the edited rows alone. Only
+   * built when a duplicate is actually on the list; dropped whenever rows
+   * move or an edit goes unrecorded, and rebuilt on the next need.
+   */
+  const keyIndex = useRef<{
+    keys: (string | null)[];
+    buckets: Map<string, number[]>;
+  } | null>(null);
+  /** The list the last render showed; the prune works from it, not inside a state updater. */
+  const errorsRef = useRef(errors);
+  useEffect(() => {
+    errorsRef.current = errors;
+  }, [errors]);
+  // A remounted sheet (Simpan, Muat ulang) holds other rows.
+  useEffect(() => {
+    keyIndex.current = null;
+  }, [control]);
+  function scheduleErrorPrune(rows?: readonly EditedRows[]) {
+    const pending = pendingEdits.current;
+    if (!rows) pending.all = true;
+    else
+      for (const range of rows) {
+        if (
+          pending.all ||
+          range.end - range.start + 1 > PRUNE_ROWS_ONE_BY_ONE
+        ) {
+          pending.all = true;
+          break;
+        }
+        for (let row = range.start; row <= range.end; row++)
+          pending.rows.add(row);
+      }
+    if (pending.rows.size > PRUNE_ROWS_ONE_BY_ONE) pending.all = true;
+    window.clearTimeout(pruneTimer.current);
+    pruneTimer.current = window.setTimeout(pruneFixedErrors, 250);
+  }
+  useEffect(() => () => window.clearTimeout(pruneTimer.current), []);
+  /** Rows → their bucket, built from one read of the sheet. */
+  function buildKeyIndex(drafts: readonly DraftRow[]) {
+    const keys = drafts.map((draft) => uniqueKeyOf(draft.cells));
+    const buckets = new Map<string, number[]>();
+    keys.forEach((key, index) => {
+      if (!key) return;
+      const rows = buckets.get(key);
+      if (rows) rows.push(index + 1);
+      else buckets.set(key, [index + 1]);
+    });
+    return { keys, buckets };
+  }
+  /**
+   * What the prune keeps of `current`, given the fresh local result for the
+   * rows it re-checked (`checked`; every row when omitted).
+   */
+  function keepUnfixed(
+    current: RowError[],
+    fresh: ReadonlyMap<string, RowError>,
+    cellAt: (row: number, column: number) => string,
+    checked?: ReadonlySet<number>,
+  ) {
+    const next = current.flatMap((error) => {
+      if (checked && !checked.has(error.row)) return [error];
+      const now = fresh.get(`${error.row}|${error.field}`);
+      const column = (columns as readonly string[]).indexOf(error.field);
+      // A server rejection names fields the grid has no column for; only
+      // the next Simpan can say whether it still stands.
+      if (column < 0) return [error];
+      const value = cellAt(error.row, column).trim();
+      // The validator cannot see an HRIS failure; the cell still holding
+      // the value that failed means it still fails.
+      const lookupFailure =
+        column === 3 && error.message !== ASSIGNEE_INVALID_MESSAGE;
+      if ((lookupFailure || error.server) && value === error.value.trim())
+        return [error];
+      if (!now) return [];
+      // Same problem, same object: no re-render while nothing changed.
+      return [now.message === error.message ? error : now];
+    });
+    const unchanged =
+      next.length === current.length &&
+      next.every((error, index) => error === current[index]);
+    return unchanged ? current : next;
+  }
+  /**
+   * Re-checks only the edited rows that carry a problem, plus — when a
+   * duplicate is on the list — the rows sharing a key with an edited row.
+   * Measured at 100.000 rows, the full validate + read it replaces was most
+   * of a 450-700 ms freeze after each typed cell.
+   */
+  function pruneEditedRows(current: RowError[], edited: ReadonlySet<number>) {
+    if (!control) return current;
+    const cells = new Map<number, DraftRow | undefined>();
+    const draftAt = (row: number) => {
+      if (!cells.has(row)) cells.set(row, control.readRow(row));
+      return cells.get(row);
+    };
+    const checked = new Set(
+      current
+        .filter((error) => edited.has(error.row))
+        .map((error) => error.row),
+    );
+    const duplicates =
+      current.some((error) => error.message === DUPLICATE_KEY_MESSAGE) ||
+      current.some(
+        (error) => checked.has(error.row) && error.field === columns[2],
+      );
+    let index = keyIndex.current;
+    if (duplicates) {
+      if (!index) index = buildKeyIndex(control.read());
+      else {
+        const affected = new Set<string>();
+        for (const row of edited) {
+          const before = index.keys[row - 1] ?? null;
+          const draft = draftAt(row);
+          const after = draft ? uniqueKeyOf(draft.cells) : null;
+          if (before === after) continue;
+          index.keys[row - 1] = after;
+          if (before) {
+            affected.add(before);
+            const rows = index.buckets
+              .get(before)
+              ?.filter((item) => item !== row);
+            if (rows?.length) index.buckets.set(before, rows);
+            else index.buckets.delete(before);
+          }
+          if (after) {
+            affected.add(after);
+            const rows = [...(index.buckets.get(after) ?? []), row].sort(
+              (a, b) => a - b,
+            );
+            index.buckets.set(after, rows);
+          }
+        }
+        // A duplicate is fixed by editing the OTHER row too.
+        for (const error of current)
+          if (
+            error.message === DUPLICATE_KEY_MESSAGE &&
+            affected.has(index.keys[error.row - 1] ?? "")
+          )
+            checked.add(error.row);
+      }
+      if (keyIndex.current !== index) {
+        // Built from the sheet as it is now: every row counts as checked.
+        keyIndex.current = index;
+        for (const error of current)
+          if (error.message === DUPLICATE_KEY_MESSAGE) checked.add(error.row);
+      }
+    } else keyIndex.current = null;
+
+    const fresh = new Map<string, RowError>();
+    for (const row of checked) {
+      const draft = draftAt(row);
+      if (!draft) continue;
+      const found = validateRows([draft], labels.current, new Set(), {
+        rowOffset: row - 1,
+      }).errors;
+      const key = index ? (index.keys[row - 1] ?? null) : null;
+      // The first row holding a key claims it; every later one is the duplicate.
+      if (key && (index?.buckets.get(key)?.[0] ?? row) < row)
+        found.push({
+          row,
+          field: columns[2],
+          value: (draft.cells[2] ?? "").trim(),
+          message: DUPLICATE_KEY_MESSAGE,
+        });
+      for (const error of found)
+        fresh.set(`${error.row}|${error.field}`, error);
+    }
+    return keepUnfixed(
+      current,
+      fresh,
+      (row, column) => draftAt(row)?.cells[column] ?? "",
+      checked,
+    );
+  }
+  function pruneFixedErrors() {
+    const edits = pendingEdits.current;
+    pendingEdits.current = { all: false, rows: new Set() };
+    if (!control) return;
+    if (edits.all) refreshOutside();
+    else refreshOutsideRows([...edits.rows]);
+
+    const current = errorsRef.current;
+    if (!current.length) {
+      // Edits go unrecorded while there is nothing to prune.
+      keyIndex.current = null;
+      return;
+    }
+    let next: RowError[];
+    if (edits.all) {
+      keyIndex.current = null;
+      const drafts = control.read();
+      const fresh = new Map(
+        validateRows(drafts, labels.current).errors.map((error) => [
+          `${error.row}|${error.field}`,
+          error,
+        ]),
+      );
+      next = keepUnfixed(
+        current,
+        fresh,
+        (row, column) => drafts[row - 1]?.cells[column] ?? "",
+      );
+    } else next = pruneEditedRows(current, edits.rows);
+    if (next === current) return;
+    // Applied only over the list it was computed from: anything that
+    // replaced the list meanwhile (a paste, a Simpan) validated afresh.
+    setErrors((latest) => (latest === current ? next : latest));
   }
   /**
    * Resolves every assignee cell, writes the labels back, and recomputes the
@@ -1185,6 +1839,88 @@ function Workspace({
    * the exact trimmed value — never a prefix — so correcting one operator
    * cannot touch another whose identifier merely starts the same.
    */
+  /**
+   * Mengembalikan rentang impor terakhir ke isinya sebelum impor: baris yang
+   * tadinya kosong dihapus dari sheet, baris yang tadinya berisi (draft atau
+   * tersimpan) mendapat isinya kembali. Tidak ada yang dikirim ke server.
+   *
+   * Ditolak, bukan ditebak, bila barisnya sudah bukan baris impor itu lagi
+   * (kuncinya berbeda) atau sebagian sudah tersimpan sejak impor — menimpa
+   * baris tersimpan dengan isi lama akan menjadi perubahan baru di server.
+   */
+  async function undoImport() {
+    const undo = lastImport;
+    if (!control || !canEdit || !undo) return;
+    await control.finish();
+
+    const now = undo.keys.map((_, index) => control.readRow(undo.row + index));
+    const moved = now.some((row, index) => row?.key !== undo.keys[index]);
+    const savedSince = now.some(
+      (row, index) =>
+        JSON.stringify(row?.original ?? null) !==
+        JSON.stringify(undo.before[index]?.original ?? null),
+    );
+    if (moved || savedSince) {
+      setLastImport(null);
+      failNotice(
+        savedSince
+          ? `Sebagian baris dari ${undo.source} sudah tersimpan, jadi impornya tidak bisa dibatalkan sekaligus. Batalkan baris tersimpan satu per satu supaya histori audit tetap ada.`
+          : `Susunan baris sudah berubah sejak ${undo.source} diimpor. Hapus baris draftnya lewat Pilih + Hapus.`,
+      );
+      return;
+    }
+
+    const count = undo.keys.length;
+    const edited = now.filter(
+      (row, index) => row?.cells.join("\t") !== undo.written[index]?.join("\t"),
+    ).length;
+    const overwritten = undo.before.filter(
+      (row) => row.original || row.cells.some(Boolean),
+    ).length;
+    if (
+      !(await confirm({
+        title: `Batalkan impor ${undo.source}?`,
+        message:
+          `${count.toLocaleString("id-ID")} baris dari impor ini dikembalikan seperti sebelum impor` +
+          (overwritten
+            ? `; ${overwritten.toLocaleString("id-ID")} baris yang tertimpa mendapat isinya kembali`
+            : "") +
+          (edited
+            ? `. ${edited.toLocaleString("id-ID")} baris sudah Anda ubah setelah impor dan perubahannya ikut hilang`
+            : "") +
+          ". Data yang sudah tersimpan di server tidak berubah.",
+        confirmLabel: "Batalkan impor",
+        cancelLabel: "Kembali",
+        tone: "danger",
+      }))
+    )
+      return;
+
+    setResolvingPaste(true);
+    try {
+      // Tulis dulu selagi posisinya masih utuh, baru hapus baris yang tadinya
+      // kosong — penghapusan memakai kunci, jadi tidak terpengaruh geseran.
+      undo.before.forEach((row, index) => {
+        if (row.original || row.cells.some(Boolean))
+          control.write(undo.row + index, row.cells);
+      });
+      control.removeDrafts(
+        undo.keys.filter((_, index) => {
+          const row = undo.before[index];
+          return row && !row.original && !row.cells.some(Boolean);
+        }),
+      );
+      setLastImport(null);
+      setImportedUnsaved(false);
+      refreshOutside();
+      await resolveAndValidate();
+      setNotice(
+        `Impor ${undo.source} dibatalkan: ${count.toLocaleString("id-ID")} baris dikembalikan seperti sebelum impor.`,
+      );
+    } finally {
+      setResolvingPaste(false);
+    }
+  }
   /**
    * Drops the rows behind one problem instead of correcting them.
    *
@@ -1293,110 +2029,374 @@ function Workspace({
     }
   }
 
+  /**
+   * Sends one saved row whose shift moved as an inline edit, then adopts the
+   * server's version into the grid so the row reads as saved again. Returns
+   * true, or the reason the server gave for refusing it.
+   */
+  async function moveSavedShift(
+    input: SaveAttempt["rows"][number],
+    old: DraftRow["original"],
+  ): Promise<true | string> {
+    if (!control || !old) return "Baris asal tidak ditemukan.";
+    const changes = {
+      shiftStart: input.shiftStart,
+      shiftEnd: input.shiftEnd,
+      pin: input.pin,
+      widthCm: input.widthCm,
+      weftDensity: input.weftDensity,
+      resultMeter: input.resultMeter,
+    };
+    try {
+      const saved = await patchProduction(
+        old.id,
+        { expectedRowVersion: old.rowVersion, ...changes },
+        csrfToken,
+      );
+      control.accept([input], {
+        batchId: saved.id,
+        sourceRevision: "",
+        counts: { inserted: 0, updated: 1, unchanged: 0, rejected: 0 },
+        rows: [
+          {
+            clientRowId: input.clientRowId,
+            outcome: "UPDATED",
+            productionEntryId: saved.id,
+            rowVersion: saved.rowVersion,
+          },
+        ],
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof ApiClientError) {
+        if (error.code === "ROW_VERSION_CONFLICT")
+          return "Baris ini sudah diubah orang lain. Muat ulang untuk melihat versi terbaru.";
+        if (error.code === "UNIQUE_KEY_CONFLICT")
+          return "Sudah ada baris lain dengan shift dan station yang sama.";
+        return error.message;
+      }
+      return error instanceof Error ? error.message : "Shift gagal diperbarui.";
+    }
+  }
+
   async function save(retry?: SaveAttempt) {
-    if (!control || !canWrite || mutation.isPending) return;
+    // Checked here, not only in runSave: the `finally` below must never clear
+    // the stepper of a save that is still in flight.
+    if (!control || !canWrite || mutation.isPending || saving) return;
+    try {
+      await runSave(retry);
+    } catch (error) {
+      failNotice(
+        `${error instanceof Error ? error.message : "Simpan gagal."} Draft tetap tersedia.`,
+      );
+    } finally {
+      // Whatever path ended the save, the stepper never stays "running".
+      setSaveRun((run) => (run?.phase === "running" ? null : run));
+    }
+  }
+  async function runSave(retry?: SaveAttempt) {
+    if (!control) return;
+    // Shown before the first await: on a large draft the HRIS lookup below is
+    // the slow part, and a Simpan that looks idle for seconds gets pressed
+    // again.
+    showSaveRun({
+      phase: "running",
+      step: "check",
+      total: 0,
+      sent: 0,
+      withShift: false,
+    });
     await control.finish();
 
     // Auto-correct the assignee cells before judging them. Without this, a
     // sheet pasted with EIDs is rejected here with nothing the admin can act
     // on — the value is correct, it just has not been translated yet.
     if (!retry && (await resolveAndValidate()).length) {
-      failNotice(
-        "Perbaiki baris yang belum valid. Belum ada data yang dikirim.",
+      failCellNotice(
+        (count) =>
+          `${count.toLocaleString("id-ID")} sel belum valid. Perbaiki sel yang ditandai merah; belum ada data yang dikirim.`,
       );
       return;
     }
 
     const drafts = control.read();
-    const validation = validateRows(drafts, labels.current);
-    const rows = validation.rows.filter((input) =>
-      isChanged(
-        input,
-        drafts.find((draft) => draft.key === input.clientRowId)?.original,
-      ),
+    const byKey = new Map(drafts.map((draft) => [draft.key, draft]));
+    // Once, not `findIndex` per moved row or per rejected field error: a
+    // 10.000-row rejection made that a hundred million comparisons.
+    const indexByKey = new Map(
+      drafts.map((draft, index) => [draft.key, index]),
     );
-    const changedKey = rows.some((input) => {
-      const old = drafts.find(
-        (draft) => draft.key === input.clientRowId,
-      )?.original;
-      return (
-        old &&
-        (Date.parse(old.shiftStart) !== Date.parse(input.shiftStart) ||
-          Date.parse(old.shiftEnd) !== Date.parse(input.shiftEnd) ||
-          old.stationNo !== input.stationNo)
-      );
+    const rowOf = (key: string) => (indexByKey.get(key) ?? -1) + 1;
+    const validation = validateRows(drafts, labels.current);
+    const changed = validation.rows.filter((input) =>
+      isChanged(input, byKey.get(input.clientRowId)?.original),
+    );
+    const stationChanged = changed.some((input) => {
+      const old = byKey.get(input.clientRowId)?.original;
+      return old && old.stationNo !== input.stationNo;
     });
-    if (!retry && changedKey) {
+    const changedKeys = new Set(changed.map((input) => input.clientRowId));
+    // Recomputed from the sheet as it is now: the `outside` state is
+    // refreshed on a timer and after inserts, so it can lag a just-typed date.
+    const leaving = (book ? rowsOutsideBook(drafts, book) : []).filter((item) =>
+      changedKeys.has(drafts[item.row - 1]?.key ?? ""),
+    );
+    if (
+      !retry &&
+      book &&
+      leaving.length &&
+      !(await confirm({
+        title: `${leaving.length.toLocaleString("id-ID")} baris di luar buku ${book.code}`,
+        message:
+          `Shift Start-nya di luar ${book.periodStart} s/d ${book.periodEnd} (ditandai kuning). ` +
+          "Tiap baris akan masuk ke buku yang mencakup tanggalnya, atau ditolak bila buku itu belum ada atau sudah tutup. " +
+          "Kalau tanggalnya salah ketik, perbaiki dulu.",
+        confirmLabel: "Tetap simpan",
+        cancelLabel: "Periksa dulu",
+      }))
+    ) {
+      setSaveRun(null);
+      return;
+    }
+    if (!retry && stationChanged) {
       failNotice(
-        "Kunci baris tersimpan tidak boleh diubah melalui batch. Koreksi shift/mesin memerlukan alur PATCH terpisah; pulihkan nilai tersebut sebelum simpan.",
+        "Station pada baris tersimpan tidak dapat diubah. Kembalikan nilainya, atau Batalkan baris itu lalu isi sebagai baris baru.",
       );
       return;
     }
-    if (!retry && !rows.length) {
+    if (!retry && !changed.length) {
       setNotice("Tidak ada perubahan untuk disimpan.");
+      return;
+    }
+    // Saved rows whose shift moved cannot ride the batch: it matches rows by
+    // shift + station, so they would land as new rows beside the old ones.
+    const moved = retry
+      ? []
+      : changed.filter((input) => {
+          const old = byKey.get(input.clientRowId)?.original;
+          return (
+            old &&
+            (Date.parse(old.shiftStart) !== Date.parse(input.shiftStart) ||
+              Date.parse(old.shiftEnd) !== Date.parse(input.shiftEnd))
+          );
+        });
+    const movedKeys = new Set(moved.map((input) => input.clientRowId));
+    const rows = changed.filter((input) => !movedKeys.has(input.clientRowId));
+    /*
+      Only the rows this save is about lose their marks. A blanket
+      `setErrors([])` also dropped server rejections and HRIS failures on rows
+      nobody touched — the red cells went, the problems did not, and the next
+      Simpan was the first place they showed up again.
+    */
+    const sending = retry ?? { key: "", rows };
+    const affected = new Set(
+      [...moved, ...sending.rows].map((input) => rowOf(input.clientRowId)),
+    );
+    const keepUnaffected = (current: RowError[]) =>
+      current.filter((error) => !affected.has(error.row));
+    let movedSaved = 0;
+    const movedErrors: RowError[] = [];
+    if (moved.length) {
+      setErrors(keepUnaffected);
+      setMovingShifts(true);
+      showSaveRun({
+        phase: "running",
+        step: "shift",
+        total: 0,
+        sent: 0,
+        withShift: true,
+      });
+      try {
+        for (const input of moved) {
+          const outcome = await moveSavedShift(
+            input,
+            byKey.get(input.clientRowId)?.original,
+          );
+          if (outcome === true) movedSaved += 1;
+          else
+            movedErrors.push({
+              row: rowOf(input.clientRowId),
+              field: columns[0],
+              value: input.shiftStart,
+              message: outcome,
+            });
+        }
+      } finally {
+        setMovingShifts(false);
+      }
+    }
+    const movedSummary = moved.length
+      ? `${movedSaved.toLocaleString("id-ID")} baris tersimpan dipindah shift-nya${
+          movedErrors.length
+            ? `, ${movedErrors.length.toLocaleString("id-ID")} ditolak`
+            : ""
+        }.`
+      : "";
+    if (!rows.length && !retry) {
+      setErrors((current) => [...keepUnaffected(current), ...movedErrors]);
+      if (movedErrors.length)
+        failNotice(`${movedSummary} Draft baris yang ditolak tetap tersedia.`);
+      else {
+        const at = new Date();
+        setLastSavedAt(at);
+        invalidateProduction();
+        showSaveRun({
+          phase: "done",
+          counts: { inserted: 0, updated: 0, unchanged: 0, rejected: 0 },
+          moved: movedSaved,
+          at,
+          firstRejectedRow: null,
+        });
+      }
       return;
     }
     const pending = retry ?? { key: crypto.randomUUID(), rows };
     setAttempt(pending);
-    setErrors([]);
-    setNotice(
-      pending.rows.length > SAVE_BATCH_ROWS
-        ? `Menyimpan ${pending.rows.length.toLocaleString("id-ID")} baris dalam beberapa batch…`
-        : "Menyimpan batch…",
-    );
+    setErrors(keepUnaffected);
+    showSaveRun({
+      phase: "running",
+      step: "send",
+      total: pending.rows.length,
+      sent: 0,
+      withShift: moved.length > 0,
+    });
+    /** Takes in what the server committed and reports it, row by row. */
+    const applyResult = (
+      result: Awaited<ReturnType<typeof saveProductionBatched>>,
+      unsent?: { rows: number; reason: string },
+    ) => {
+      control.accept(pending.rows, result);
+      const rejectedErrors: RowError[] = [
+        ...movedErrors,
+        ...result.rows.flatMap((item) =>
+          item.outcome === "REJECTED"
+            ? (item.fieldErrors?.length
+                ? item.fieldErrors
+                : [{ field: ROW_FIELD, message: "Baris ditolak server." }]
+              ).map((error) => {
+                const index = rowOf(item.clientRowId) - 1;
+                const field = serverFieldColumn(error.field);
+                const column = (columns as readonly string[]).indexOf(field);
+                return {
+                  row: index + 1,
+                  field,
+                  value: column < 0 ? "" : (drafts[index]?.cells[column] ?? ""),
+                  message: error.message,
+                  server: true,
+                };
+              })
+            : [],
+        ),
+      ];
+      setErrors((current) => [...keepUnaffected(current), ...rejectedErrors]);
+      const at = new Date();
+      if (result.counts.inserted + result.counts.updated + movedSaved > 0) {
+        setLastSavedAt(at);
+        invalidateProduction();
+      }
+      const rejectedRows = rejectedErrors
+        .map((error) => error.row)
+        .filter((row) => row > 0);
+      showSaveRun({
+        phase: "done",
+        counts: {
+          ...result.counts,
+          rejected: result.counts.rejected + movedErrors.length,
+        },
+        moved: movedSaved,
+        at,
+        // A loop, not Math.min(...rows): a 100.000-row rejection would
+        // overflow the argument list.
+        firstRejectedRow: rejectedRows.reduce<number | null>(
+          (first, row) => (first === null || row < first ? row : first),
+          null,
+        ),
+        ...(unsent ? { unsent } : {}),
+      });
+    };
     try {
       const result = await mutation.mutateAsync(pending);
+      const sent = new Set(pending.rows.map((input) => input.clientRowId));
       if (
         result.rows.length !== pending.rows.length ||
         new Set(result.rows.map((item) => item.clientRowId)).size !==
           pending.rows.length ||
         result.rows.some(
           (item) =>
-            !pending.rows.some(
-              (input) => input.clientRowId === item.clientRowId,
-            ) ||
+            !sent.has(item.clientRowId) ||
             (item.outcome !== "REJECTED" &&
               (!item.productionEntryId || !item.rowVersion)),
         )
       )
-        throw new Error(
-          "Respons batch tidak lengkap. Ulangi percobaan dengan idempotency key yang sama.",
-        );
-      control.accept(pending.rows, result);
+        // Definitive, not "retry the same key": a replay returns this same
+        // body, and the grid would stay locked behind it forever.
+        throw new BatchResponseShapeError();
       setAttempt(null);
-      setErrors(
-        result.rows.flatMap((item) =>
-          item.outcome === "REJECTED"
-            ? (item.fieldErrors?.length
-                ? item.fieldErrors
-                : [{ field: "Baris", message: "Baris ditolak server." }]
-              ).map((error) => ({
-                row:
-                  drafts.findIndex((draft) => draft.key === item.clientRowId) +
-                  1,
-                field: error.field,
-                value: "",
-                message: error.message,
-              }))
-            : [],
-        ),
-      );
-      setNotice(
-        `${result.counts.inserted} ditambahkan · ${result.counts.updated} diperbarui · ${result.counts.unchanged} tetap · ${result.counts.rejected} ditolak. Draft baris ditolak tetap tersedia.`,
-      );
+      applyResult(result);
     } catch (error) {
+      if (error instanceof PartialSaveError) {
+        // The committed chunks are real rows now. Taking them in gives them
+        // their ids and versions, so the next Simpan sends only the rest —
+        // with a fresh key, because the remainder is a new payload.
+        setAttempt(null);
+        const committed = new Set(
+          error.completed.rows.map((item) => item.clientRowId),
+        );
+        applyResult(error.completed, {
+          rows: pending.rows.filter(
+            (input) => !committed.has(input.clientRowId),
+          ).length,
+          reason:
+            error.cause instanceof Error
+              ? error.cause.message
+              : "batch berikutnya gagal.",
+        });
+        return;
+      }
+      if (isUnknownOutcome(error)) {
+        failNotice(
+          error instanceof ApiClientError && error.code === "IMPORT_IN_PROGRESS"
+            ? "Simpan yang sama masih diproses server. Tunggu sebentar lalu klik Ulangi simpan yang sama."
+            : `${error instanceof Error ? error.message : "Simpan gagal."} Hasilnya belum pasti; draft tetap tersedia.`,
+        );
+        return;
+      }
+      setAttempt(null);
       failNotice(
         `${error instanceof Error ? error.message : "Simpan gagal."} Draft tetap tersedia.`,
       );
-      // Definitive 4xx rejections did not apply the batch. Unknown outcomes retain their key/payload.
-      if (
-        error instanceof ApiClientError &&
-        error.status >= 400 &&
-        error.status < 500 &&
-        ![408, 429].includes(error.status)
-      )
-        setAttempt(null);
     }
+  }
+  /**
+   * The production lists other mounts would read are stale after a save.
+   * Marked only — `refetchType: "none"` — because refetching the list this
+   * workspace was built from would remount the grid and throw away the rows
+   * the server just rejected.
+   */
+  function invalidateProduction() {
+    void employeeCache.invalidateQueries({
+      queryKey: ["production"],
+      refetchType: "none",
+    });
+  }
+  /**
+   * Abandons an attempt whose outcome is unknown and reloads from the
+   * server, which is the only place that knows what landed. Without it the
+   * grid stayed inert until the same request finally succeeded.
+   */
+  async function discardAttempt() {
+    if (
+      !(await confirm({
+        title: "Buang percobaan dan muat ulang?",
+        message:
+          "Hasil simpan terakhir belum pasti: sebagian atau semua baris mungkin sudah tersimpan. Data akan dimuat ulang dari server dan draft yang belum tersimpan di layar ini hilang.",
+        confirmLabel: "Buang & muat ulang",
+        tone: "danger",
+      }))
+    )
+      return;
+    setAttempt(null);
+    onReload("Percobaan simpan dibuang. Data dimuat ulang dari server.");
   }
   async function navigate(action: (() => void) | undefined) {
     if (!action) return;
@@ -1474,11 +2474,35 @@ function Workspace({
       }`,
     );
   }
+  /**
+   * Ctrl+V, klik kanan → Paste, dan tombol Tempel menulis langsung ke sel
+   * mulai dari sel aktif, seperti spreadsheet. Jalurnya tetap `applyRows`:
+   * tanggal/desimal dirapikan, EID jadi PIN, lalu sel yang salah ditandai —
+   * tidak ada jalur tulis kedua yang aturannya bisa menyimpang.
+   */
+  function pasteIntoGrid(text: string) {
+    if (!canEdit || !control || !text) return;
+    void applyRows({ text, target: control.activeCell(), source: "" });
+  }
+  /**
+   * Tombol Tempel membaca clipboard sendiri. Bila browser menolak, panel
+   * preview terbuka supaya teksnya bisa ditempel manual di sana.
+   */
+  function pasteFromButton() {
+    if (!canEdit || !control) return;
+    navigator.clipboard.readText().then(
+      (text) => (text ? pasteIntoGrid(text) : openPaste("")),
+      () => openPaste(""),
+    );
+  }
   function openPaste(text: string) {
     if (!canEdit || !control) return;
     setPasteTarget(control.activeCell());
     setClipboard(text);
-    setErrors([]);
+    setSideTab("paste");
+    requestAnimationFrame(() =>
+      pastePanel.current?.scrollIntoView({ block: "nearest" }),
+    );
   }
 
   /**
@@ -1498,7 +2522,6 @@ function Workspace({
   }
   async function importFileSteps(chosen: File) {
     if (!canEdit || !control) return;
-    setErrors([]);
 
     /*
       .xlsx diterjemahkan dulu ke teks tab-separated, lalu masuk jalur yang
@@ -1533,6 +2556,7 @@ function Workspace({
     if (file.size > GRID_IMPORT_MAX_BYTES) {
       setBulkImport({
         file,
+        key: crypto.randomUUID(),
         running: false,
         progress: null,
         summary: null,
@@ -1552,21 +2576,34 @@ function Workspace({
       const parsed = parseImportFile(content);
 
       await control.finish();
-      // Baris draft kosong pertama, bukan baris 1: baris awal workspace biasanya
-      // berisi data yang sudah tersimpan, dan menimpanya diam-diam mengubah
-      // produksi orang lain lewat jalur yang dikira "menambah".
+      // Sesudah baris terakhir yang berisi, bukan di baris kosong pertama:
+      // celah kosong di tengah data membuat impor mulai di sana dan menimpa
+      // baris tersimpan di bawahnya — perubahan produksi lewat jalur yang
+      // dikira "menambah".
       const drafts = control.read();
-      const start = drafts.findIndex(
-        (item) => !item.original && item.cells.every((cell) => !cell),
-      );
-
-      const target = start >= 0 ? start : drafts.length;
+      let target = drafts.length;
+      while (
+        target > 0 &&
+        !drafts[target - 1]!.original &&
+        drafts[target - 1]!.cells.every((cell) => !cell)
+      )
+        target -= 1;
+      const overlapsSaved = drafts
+        .slice(target, target + parsed.cells.length)
+        .some((item) => item.original);
+      if (overlapsSaved) {
+        failNotice(
+          "Rentang tujuan impor berisi baris tersimpan. Tidak ada yang ditulis; muat ulang lalu coba lagi.",
+        );
+        return;
+      }
 
       if (target + parsed.cells.length > MAX_ROWS) {
         // Muat di file, tidak muat di grid: kirim langsung, jangan suruh orang
         // memecah filenya sendiri.
         setBulkImport({
           file,
+          key: crypto.randomUUID(),
           running: false,
           progress: null,
           summary: null,
@@ -1583,6 +2620,11 @@ function Workspace({
       setNotice(
         `${parsed.cells.length.toLocaleString("id-ID")} baris dibaca dari ${file.name}${sheetLabel}` +
           `${parsed.headerDetected ? " (baris judul dikenali)" : " (tanpa baris judul)"}` +
+          `${
+            parsed.skippedBeforeHeader
+              ? `. ${parsed.skippedBeforeHeader} baris di atas judul kolom dilewati`
+              : ""
+          }` +
           `${
             parsed.assumedColumns.length
               ? `. Kolom tanpa judul dibaca sebagai ${parsed.assumedColumns.join(", ")}`
@@ -1602,6 +2644,24 @@ function Workspace({
         text: toClipboardText(parsed.cells),
         target: { row: target + 1, column: 1 },
         source: `${file.name}${sheetLabel}`,
+        // Kolom lebih pada file tanpa judul: barisnya tetap masuk, masalahnya
+        // ditandai di baris itu dengan nomor baris filenya.
+        extraErrors: parsed.problems.map((problem) => ({
+          row: target + 1 + problem.index,
+          field: ROW_FIELD,
+          value: "",
+          message: `Baris file ${parsed.fileRows[problem.index]?.toLocaleString("id-ID") ?? "?"}: ${problem.message}`,
+        })),
+        onProgress: (written, total) =>
+          setImportProgress((current) =>
+            current
+              ? {
+                  ...current,
+                  fraction: written / total,
+                  detail: `${written.toLocaleString("id-ID")} dari ${total.toLocaleString("id-ID")} baris`,
+                }
+              : current,
+          ),
         onStage: async (stage) => {
           setImportStage(
             stage,
@@ -1643,53 +2703,102 @@ function Workspace({
     target: where,
     source,
     onStage,
+    onProgress,
+    extraErrors = [],
   }: {
     text: string;
     target: { row: number; column: number };
     source: string;
+    /** Problems found before the cells were written (import only). */
+    extraErrors?: RowError[];
     /** Import only: reports the slow steps to the progress modal. */
     onStage?: (stage: "resolve" | "write") => Promise<void>;
+    /** Import only: rows written to the grid so far, of `total`. */
+    onProgress?: (written: number, total: number) => void;
   }) {
     if (!control || !canEdit) return;
     setResolvingPaste(true);
     const controller = new AbortController();
     pasteAbort.current = controller;
     setNotice("Memvalidasi baris dan identitas karyawan…");
+    /*
+      Long pastes run in slices of SLICE_ROWS with a yield in between, so the
+      tab keeps painting (and the progress keeps moving) instead of freezing
+      for seconds. The order is unchanged and so is what a cancel means:
+      everything up to the HRIS lookup only reads the sheet, the cancel point
+      is still before the first cell is written, and once writing starts it
+      runs to the end. The grid is inert meanwhile (`busy`), so nothing else
+      writes between slices.
+    */
+    const slices = async (
+      length: number,
+      run: (from: number, to: number) => void,
+    ) => {
+      for (let from = 0; from < length; from += SLICE_ROWS) {
+        if (controller.signal.aborted) return false;
+        run(from, Math.min(length, from + SLICE_ROWS));
+        if (from + SLICE_ROWS < length) await yieldToMain();
+      }
+      return !controller.signal.aborted;
+    };
     try {
       await control.finish();
       const raw = parseClipboard(text);
-      const parsed = normalizePastedCells(raw, where.column);
-      const normalizedDates = raw.reduce(
-        (count, row, rowIndex) =>
-          count +
-          row.reduce(
-            (rowCount, value, columnIndex) =>
-              rowCount + (value !== parsed[rowIndex]?.[columnIndex] ? 1 : 0),
-            0,
-          ),
-        0,
-      );
-      const drafts = control.read();
       if (
-        where.row + parsed.length - 1 > MAX_ROWS ||
-        where.column + (parsed[0]?.length ?? 0) - 1 > 7
+        where.row + raw.length - 1 > MAX_ROWS ||
+        where.column + (raw[0]?.length ?? 0) - 1 > 7
       )
         throw new Error(
           `Rentang melewati batas workspace (${MAX_ROWS.toLocaleString("id-ID")} baris / 7 kolom). Ubah tujuan; tidak ada data yang dipangkas.`,
         );
-      // `read()` hanya mengembalikan baris yang pernah tersentuh. Menempel ke
-      // baris kosong di luar jendela itu sah, jadi barisnya disiapkan di sini —
-      // tanpa ini paste besar diam-diam cuma menulis sebagian.
+      await yieldToMain();
+      const parsed: string[][] = [];
+      let normalizedDates = 0;
+      await slices(raw.length, (from, to) => {
+        const part = normalizePastedCells(raw.slice(from, to), where.column);
+        part.forEach((row, offset) => {
+          const before = raw[from + offset];
+          row.forEach((value, columnIndex) => {
+            if (value !== before?.[columnIndex]) normalizedDates += 1;
+          });
+          parsed.push(row);
+        });
+      });
+      // `read()` hanya mengembalikan baris yang pernah tersentuh — dibaca per
+      // potongan supaya 100.000 baris tidak dibaca dalam satu tugas.
+      const drafts: DraftRow[] = [];
+      for (let row = 1; ; row += SLICE_ROWS) {
+        const part = control.readRange(row, SLICE_ROWS);
+        for (const draft of part) drafts.push(draft);
+        if (part.length < SLICE_ROWS || controller.signal.aborted) break;
+        await yieldToMain();
+      }
+      // Menempel ke baris kosong di luar jendela itu sah, jadi barisnya
+      // disiapkan di sini — tanpa ini paste besar diam-diam cuma menulis
+      // sebagian.
       const needed = where.row - 1 + parsed.length;
-      const proposed = Array.from(
-        { length: Math.max(drafts.length, needed) },
-        (_, index) => {
+      const proposed: DraftRow[] = [];
+      await slices(Math.max(drafts.length, needed), (from, to) => {
+        for (let index = from; index < to; index++) {
           const draft = drafts[index];
-          return draft
-            ? { ...draft, cells: [...draft.cells] }
-            : { key: `pending-${index + 1}`, cells: Array<string>(7).fill("") };
-        },
-      );
+          proposed.push(
+            draft
+              ? { ...draft, cells: [...draft.cells] }
+              : {
+                  key: `pending-${index + 1}`,
+                  cells: Array<string>(7).fill(""),
+                },
+          );
+        }
+      });
+      // Isi rentang SEBELUM ditimpa, untuk "Batalkan impor".
+      const before = parsed.map((_, index) => {
+        const draft = drafts[where.row - 1 + index];
+        return {
+          cells: draft ? [...draft.cells] : Array<string>(7).fill(""),
+          original: draft?.original,
+        };
+      });
       parsed.forEach((values, index) => {
         const target = proposed[where.row - 1 + index];
         if (target)
@@ -1726,28 +2835,94 @@ function Workspace({
             message,
           });
       });
-      if (controller.signal.aborted) return;
-      await onStage?.("write");
-      control.writeRange(
-        where.row,
-        incoming.map((item) => item.cells),
-      );
-      const errors = mergeErrors(
-        lookupErrors,
-        validateRows(proposed, labels.current).errors,
-      );
-      if (errors.length) {
-        setErrors(errors);
-        setClipboard(null);
-        if (source) setImportedUnsaved(true);
-        failNotice(
-          `${parsed.length.toLocaleString("id-ID")} baris ${source ? `dari ${source} ` : ""}masuk ke draft. ` +
-            `${errors.length.toLocaleString("id-ID")} sel perlu diperbaiki sebelum disimpan — sel yang bermasalah ditandai merah di grid.`,
+      if (controller.signal.aborted) {
+        // The lookup came back after the cancel: nothing was written, so the
+        // "Memvalidasi…" line must not stay up as if something still runs.
+        setNotice(
+          source
+            ? "Impor dibatalkan. Draft tidak berubah."
+            : "Paste dibatalkan. Draft tidak berubah.",
         );
         return;
       }
+      await onStage?.("write");
+      control.reserveRows(where.row + incoming.length - 1);
+      const written = await slices(incoming.length, (from, to) => {
+        control.writeRange(
+          where.row + from,
+          incoming.slice(from, to).map((item) => item.cells),
+        );
+        onProgress?.(to, incoming.length);
+        if (!source && incoming.length > SLICE_ROWS)
+          setNoticeText(
+            `Menulis ke grid… ${to.toLocaleString("id-ID")} dari ${incoming.length.toLocaleString("id-ID")} baris.`,
+          );
+      });
+      // Only an unmount aborts past this point; the page is gone.
+      if (!written) return;
+      // The writes above report no edits; whatever the key index knew is stale.
+      keyIndex.current = null;
+      if (source) {
+        const keys: string[] = [];
+        await slices(incoming.length, (from, to) => {
+          for (const draft of control.readRange(where.row + from, to - from))
+            keys.push(draft.key);
+        });
+        setLastImport({
+          source,
+          row: where.row,
+          before,
+          written: incoming.map((item) => [...item.cells]),
+          keys,
+        });
+      }
+      // `proposed` IS the sheet now; no second read for the warnings.
+      if (book) showOutside(rowsOutsideBook(proposed, book));
+      const writtenEnd = where.row + parsed.length;
+      /*
+        Rows outside the range just written keep the problems only a server
+        or HRIS can report — `validateRows` below cannot reproduce them, and
+        replacing the list with its result alone made them vanish while the
+        rows still fail.
+      */
+      const keptRemote = (current: RowError[]) =>
+        current.filter(
+          (error) =>
+            (error.row < where.row || error.row >= writtenEnd) &&
+            (error.server ||
+              (error.field === columns[3] &&
+                error.message !== ASSIGNEE_INVALID_MESSAGE)),
+        );
+      // Sliced with one shared key set: the same result as one call over
+      // every row, duplicates across slices included.
+      const localErrors: RowError[] = [];
+      const seenKeys = new Set<string>();
+      await slices(proposed.length, (from, to) => {
+        for (const error of validateRows(
+          proposed.slice(from, to),
+          labels.current,
+          seenKeys,
+          { rowOffset: from },
+        ).errors)
+          localErrors.push(error);
+      });
+      const errors = mergeErrors(
+        [...extraErrors, ...lookupErrors],
+        localErrors,
+      );
+      if (errors.length) {
+        setErrors((current) => mergeErrors(errors, keptRemote(current)));
+        setClipboard(null);
+        if (source) setImportedUnsaved(true);
+        // Most of the rows landed: say so plainly. The cells that still need
+        // work get their own strip (count, stepping) right under this line,
+        // instead of turning a near-success into a red alarm.
+        const landed = `${parsed.length.toLocaleString("id-ID")} baris ${source ? `dari ${source} ` : ""}masuk ke draft.`;
+        failCellNotice(() => landed, "info");
+        return;
+      }
       setClipboard(null);
-      setErrors([]);
+      setErrors(keptRemote);
       if (source) setImportedUnsaved(true);
       setNotice(
         `${parsed.length.toLocaleString("id-ID")} baris ${source ? `dari ${source} diimpor` : "ditempel"} ke draft.${
@@ -1804,7 +2979,7 @@ function Workspace({
       const summary = await importProductionStream({
         chunks: counted(),
         signal: controller.signal,
-        newKey: () => crypto.randomUUID(),
+        importKey: bulkImport.key,
         send: (rows, key) => saveProduction({ key, rows }, csrfToken),
         onProgress: (progress) => {
           setBulkImport((state) => (state ? { ...state, progress } : state));
@@ -1928,6 +3103,7 @@ function Workspace({
       const machine = voidTarget.stationNo;
       setVoidAttempt(null);
       setVoidTarget(null);
+      invalidateProduction();
       onReload(
         `Data mesin ${machine} berhasil dibatalkan dan tidak lagi masuk daftar aktif.`,
       );
@@ -1935,14 +3111,38 @@ function Workspace({
       setVoidError(
         `${error instanceof Error ? error.message : "Pembatalan gagal."} Data belum diubah di layar.`,
       );
-      if (
-        error instanceof ApiClientError &&
-        error.status >= 400 &&
-        error.status < 500 &&
-        ![408, 429].includes(error.status)
-      )
-        setVoidAttempt(null);
+      if (!isUnknownOutcome(error)) setVoidAttempt(null);
     }
+  }
+  /**
+   * Leaves a void whose outcome is unknown. The dialog used to refuse to
+   * close until the same request succeeded; now it closes and the rows are
+   * reloaded, since only the server knows whether the row is VOID.
+   */
+  async function abandonVoid() {
+    const machine = voidTarget?.stationNo;
+    setVoidTarget(null);
+    setVoidAttempt(null);
+    setVoidError("");
+    if (
+      status.dirty &&
+      !(await confirm({
+        title: "Muat ulang dan buang draft?",
+        message:
+          "Status pembatalan belum pasti dan hanya bisa dipastikan dengan memuat ulang data. Draft yang belum disimpan di layar ini akan hilang.",
+        confirmLabel: "Buang draft & muat ulang",
+        tone: "danger",
+      }))
+    ) {
+      failNotice(
+        `Hasil pembatalan mesin ${machine ?? ""} belum pasti. Muat ulang untuk melihat statusnya di server.`,
+      );
+      return;
+    }
+    invalidateProduction();
+    onReload(
+      `Hasil pembatalan mesin ${machine ?? ""} belum pasti; data dimuat ulang dari server.`,
+    );
   }
   return (
     <section className="manual-workspace" aria-labelledby="workspace-heading">
@@ -1969,14 +3169,8 @@ function Workspace({
               ))}
             </div>
           )}
-          <div inert={busy} className="manual-grid-shell">
-            <Suspense
-              fallback={
-                <p role="status" className="manual-notice">
-                  Memuat engine spreadsheet…
-                </p>
-              }
-            >
+          <div inert={busy} ref={gridShell} className="manual-grid-shell">
+            <Suspense fallback={<GridSkeleton stage="engine" />}>
               <Grid
                 entries={entries}
                 names={names}
@@ -1984,8 +3178,8 @@ function Workspace({
                 onReady={setControl}
                 onStatus={setStatus}
                 onAssignee={requestAssignee}
-                onDateCell={requestDateCell}
-                onPaste={openPaste}
+                onCellTrigger={requestCellTrigger}
+                onPaste={pasteIntoGrid}
                 onBlocked={failNotice}
                 /*
                   Insert and delete are real spreadsheet actions here, so the
@@ -1993,22 +3187,58 @@ function Workspace({
                   this, "baris 9.115" in the problem list would point at
                   whatever slid into that position.
                 */
-                onRowsShifted={(from, delta) =>
-                  setErrors((current) => shiftRows(current, from, delta))
-                }
-                onRowsRemoved={(rows) =>
-                  setErrors((current) => removeRowsFrom(current, rows))
-                }
+                onRowsShifted={(from, delta) => {
+                  setErrors((current) => shiftRows(current, from, delta));
+                  setOutside((current) => shiftRows(current, from, delta));
+                  setSaveRun((run) =>
+                    moveRejectedRow(run, (rows) =>
+                      shiftRows(rows, from, delta),
+                    ),
+                  );
+                  setLastImport((current) =>
+                    current && from <= importEnd(current) ? null : current,
+                  );
+                  scheduleErrorPrune();
+                }}
+                onRowsRemoved={(rows) => {
+                  setErrors((current) => removeRowsFrom(current, rows));
+                  setOutside((current) => removeRowsFrom(current, rows));
+                  setSaveRun((run) =>
+                    moveRejectedRow(run, (items) =>
+                      removeRowsFrom(items, rows),
+                    ),
+                  );
+                  setLastImport((current) =>
+                    current && rows.some((row) => row <= importEnd(current))
+                      ? null
+                      : current,
+                  );
+                  scheduleErrorPrune();
+                }}
+                onEdited={scheduleErrorPrune}
               />
             </Suspense>
-            {dateAnchor && canEdit && (
+            {cellAnchor && canEdit && cellAnchor.column === 4 && (
+              <AssigneeCellTrigger
+                anchor={cellAnchor}
+                open={assigneeAnchor?.row === cellAnchor.row}
+                onToggle={() =>
+                  requestAssignee(
+                    assigneeAnchor?.row === cellAnchor.row
+                      ? null
+                      : assigneeBelow(cellAnchor),
+                  )
+                }
+              />
+            )}
+            {cellAnchor && canEdit && cellAnchor.column !== 4 && (
               <DateCellPicker
                 // A different cell is a different popover: remounting drops the
                 // previous cell's open state without a setState-in-effect.
-                key={`${dateAnchor.row}:${dateAnchor.column}`}
-                anchor={dateAnchor}
+                key={`${cellAnchor.row}:${cellAnchor.column}`}
+                anchor={cellAnchor}
                 onApply={applyDateCell}
-                onDismiss={() => control?.select(dateAnchor.row)}
+                onDismiss={() => control?.select(cellAnchor.row)}
               />
             )}
             {assigneeAnchor && canEdit && (
@@ -2031,64 +3261,46 @@ function Workspace({
               </div>
             )}
           </div>
-          <div className="manual-pagination">
-            <span>
-              Halaman {pageNumber} · {entries.length} baris dari server ·
-              kapasitas draft {MAX_ROWS.toLocaleString("id-ID")}
-            </span>
-            <div>
-              <select
-                aria-label="Baris per halaman"
-                className="manual-page-size"
-                value={pageSize}
-                disabled={busy}
-                onChange={(event) => {
-                  const size = Number(event.target.value);
-                  void navigate(() => onPageSize(size));
-                }}
-              >
-                {[100, 250, 500].map((size) => (
-                  <option key={size} value={size}>
-                    {size} / halaman
-                  </option>
-                ))}
-              </select>
-              <button
-                className="manual-btn"
-                disabled={!onPrevious || busy}
-                onClick={() => navigate(onPrevious)}
-              >
-                Sebelumnya
-              </button>
-              <button
-                className="manual-btn"
-                disabled={!onNext || busy}
-                onClick={() => navigate(onNext)}
-              >
-                Berikutnya
-              </button>
-            </div>
-          </div>
         </div>
         <div className="manual-split-side">
           <div className="manual-side-controls">
             {controls}
             <div className="manual-workspace-heading">
               <h2 id="workspace-heading">Data produksi</h2>
-              <p>
-                {status.populated.toLocaleString("id-ID")} baris terisi ·{" "}
-                {status.selected.toLocaleString("id-ID")} dipilih ·{" "}
-                {status.dirty
-                  ? "Ada draft belum disimpan"
-                  : "Tidak ada perubahan"}
+              {/*
+                Draft state first: it is the one part that decides whether
+                leaving the page loses work, so it is the part that must
+                survive when a narrow window clips this line.
+              */}
+              <p
+                className="manual-draft-status"
+                title={`${draftState} · ${status.selected.toLocaleString("id-ID")} dipilih · ${status.populated.toLocaleString("id-ID")} baris terisi`}
+              >
+                <span
+                  className={`manual-draft-state${status.dirty ? " manual-draft-dirty" : !saving && lastSavedAt ? " manual-draft-saved" : ""}`}
+                >
+                  {draftState}
+                </span>
+                <span>
+                  {" "}
+                  · {status.selected.toLocaleString("id-ID")} dipilih
+                </span>
+                <span className="manual-draft-filled">
+                  {" "}
+                  · {status.populated.toLocaleString("id-ID")} baris terisi
+                </span>
               </p>
               <button
-                className="manual-btn manual-primary"
+                className="manual-btn manual-primary manual-save-button"
                 aria-label="Simpan perubahan"
+                aria-busy={saving}
                 disabled={!canEdit || !control}
                 onClick={() => void save()}
               >
-                Simpan
+                {saving && (
+                  <span className="manual-save-spinner" aria-hidden="true" />
+                )}
+                {saving ? "Menyimpan" : "Simpan"}
               </button>
             </div>
             {readOnlyReason && (
@@ -2104,31 +3316,42 @@ function Workspace({
             <div
               // A failure is announced, not just displayed: `alert` interrupts a
               // screen reader, `status` waits its turn. Same reason it turns red.
-              role={noticeFailed ? "alert" : "status"}
+              role={shownFailed ? "alert" : "status"}
               className={
-                noticeFailed
+                shownFailed
                   ? "manual-status manual-status-failed"
                   : "manual-status"
               }
             >
-              {noticeFailed && (
+              {shownFailed && (
                 <span aria-hidden="true" className="manual-status-mark">
                   !
                 </span>
               )}
-              {notice}
+              {shownNotice}
             </div>
+            {saveRun && (
+              <SaveProgress
+                run={saveRun}
+                onShowRow={(row) => control?.select(row)}
+                rowLabel={gridRowLabel}
+              />
+            )}
             {/*
-              Three groups by what the action works on, each on its own line so
-              a wrap never splits one family across rows: the rows in the
-              grid, data coming in, and what the column below shows.
+              Three groups by what the action works on, each labelled and on
+              its own line: the rows in the grid, data coming in, and the
+              panels beside it. At most four controls each; the rare row
+              actions (copy, void a saved row) sit in "Lainnya".
             */}
             <div className="manual-toolbar">
               <div
                 className="manual-toolbar-group"
                 role="group"
-                aria-label="Baris"
+                aria-labelledby="manual-toolbar-rows"
               >
+                <span id="manual-toolbar-rows" className="manual-toolbar-label">
+                  Baris
+                </span>
                 <label className="manual-checkbox">
                   <input
                     type="checkbox"
@@ -2142,11 +3365,11 @@ function Workspace({
                       control?.selectAll(event.target.checked)
                     }
                   />
-                  Pilih semua
+                  Semua
                 </label>
                 <button
                   className="manual-btn"
-                  aria-label="Tambah baris"
+                  title="Pilih baris kosong berikutnya untuk diisi."
                   disabled={!canEdit || !control}
                   onClick={() => {
                     const rows = control?.read() ?? [];
@@ -2165,18 +3388,12 @@ function Workspace({
                       return;
                     }
                     control?.select(target);
-                    setNotice(`Isi baris ${target} di grid atau editor baris.`);
+                    setNotice(
+                      `Isi baris ${gridRowLabel(target)} di grid atau editor baris.`,
+                    );
                   }}
                 >
-                  Tambah
-                </button>
-                <button
-                  className="manual-btn"
-                  aria-label={`Salin baris (${status.selected})`}
-                  disabled={!status.selected}
-                  onClick={() => void copyRows()}
-                >
-                  Salin
+                  Baris baru
                 </button>
                 <button
                   className="manual-btn"
@@ -2187,35 +3404,49 @@ function Workspace({
                 >
                   Hapus
                 </button>
-                <button
-                  className="manual-btn"
-                  aria-label="Batalkan data"
-                  title={
-                    status.dirty
-                      ? "Simpan atau buang draft sebelum membatalkan data."
-                      : "Batalkan satu data tanpa menghapus histori audit."
-                  }
-                  disabled={
-                    !canEdit ||
-                    !control ||
-                    status.selected !== 1 ||
-                    status.dirty
-                  }
-                  onClick={() => void openVoid()}
-                >
-                  Batalkan
-                </button>
+                <ToolbarMenu
+                  label="Lainnya"
+                  items={[
+                    {
+                      label: `Salin baris terpilih (${status.selected.toLocaleString("id-ID")})`,
+                      ariaLabel: `Salin baris (${status.selected})`,
+                      disabled: !status.selected,
+                      reason: "Pilih baris dulu lewat kotak centang.",
+                      onSelect: () => void copyRows(),
+                    },
+                    {
+                      label: "Batalkan data tersimpan…",
+                      ariaLabel: "Batalkan data",
+                      tone: "danger",
+                      disabled:
+                        !canEdit ||
+                        !control ||
+                        status.selected !== 1 ||
+                        status.dirty,
+                      reason: status.dirty
+                        ? "Simpan atau buang draft dulu."
+                        : "Pilih tepat satu baris tersimpan. Histori audit tetap ada.",
+                      onSelect: () => void openVoid(),
+                    },
+                  ]}
+                />
               </div>
               <div
                 className="manual-toolbar-group"
                 role="group"
-                aria-label="Data masuk"
+                aria-labelledby="manual-toolbar-incoming"
               >
+                <span
+                  id="manual-toolbar-incoming"
+                  className="manual-toolbar-label"
+                >
+                  Masuk
+                </span>
                 <button
                   className="manual-btn"
                   aria-label="Tempel data"
                   disabled={!canEdit || !control}
-                  onClick={() => openPaste("")}
+                  onClick={pasteFromButton}
                 >
                   Tempel
                 </button>
@@ -2241,32 +3472,49 @@ function Workspace({
                 >
                   Impor file
                 </button>
-                {/*
-                  Beside the button that needs them. The links used to live only inside
-                  the paste panel and the direct-to-server panel, so the ordinary
-                  "Impor file" path never showed a template to anyone.
-                */}
+                {lastImport && (
+                  <button
+                    className="manual-btn manual-danger-quiet"
+                    aria-label={`Batalkan impor ${lastImport.source}`}
+                    title="Kembalikan baris yang diimpor terakhir ke keadaan sebelum impor. Hanya draft; data tersimpan tidak berubah."
+                    disabled={!canEdit || !control || busy}
+                    onClick={() => void undoImport()}
+                  >
+                    Batalkan impor
+                  </button>
+                )}
                 {/* Petunjuk ada di sheet "Cara Pakai" di dalam file yang sama. */}
-                <span className="manual-template-links">
-                  <a href="/templates/manual-data-template.xlsx" download>
-                    Template Excel
-                  </a>
-                </span>
+                <a
+                  className="manual-toolbar-link"
+                  href="/templates/manual-data-template.xlsx"
+                  download
+                >
+                  Template Excel
+                </a>
               </div>
               <div
                 className="manual-toolbar-group"
                 role="group"
-                aria-label="Tampilan"
+                aria-labelledby="manual-toolbar-panels"
               >
+                <span
+                  id="manual-toolbar-panels"
+                  className="manual-toolbar-label"
+                >
+                  Panel
+                </span>
                 <button
                   className="manual-btn"
                   type="button"
                   aria-expanded={showEditor}
                   aria-controls="manual-side-panel-editor"
+                  aria-describedby={
+                    importedUnsaved ? "manual-editor-locked" : undefined
+                  }
                   disabled={importedUnsaved}
                   title={
                     importedUnsaved
-                      ? "Editor baris tersedia lagi setelah hasil impor disimpan atau dibatalkan."
+                      ? "Edit baris aktif lagi setelah impor disimpan atau dibatalkan."
                       : undefined
                   }
                   onClick={() => {
@@ -2301,26 +3549,116 @@ function Workspace({
                   Muat ulang
                 </button>
               </div>
+              {importedUnsaved && (
+                <p id="manual-editor-locked" className="manual-toolbar-note">
+                  Edit baris aktif lagi setelah impor disimpan atau dibatalkan.
+                </p>
+              )}
             </div>
+            {/*
+              What still needs work sits under the actions, so the buttons
+              keep one place on screen; the save feedback above stays right
+              beside Simpan, where a click is looked for.
+            */}
+            {errors.length > 0 && cursorRow !== undefined && (
+              <div
+                className="manual-fix-strip"
+                role="group"
+                aria-label="Sel yang perlu diperbaiki"
+              >
+                <p className="manual-fix-strip-count">
+                  <strong>
+                    {errors.length.toLocaleString("id-ID")} sel perlu diperbaiki
+                  </strong>{" "}
+                  sebelum disimpan
+                  {errorRows.length > 1
+                    ? ` · ${errorRows.length.toLocaleString("id-ID")} baris`
+                    : ""}
+                </p>
+                <div className="manual-fix-strip-nav">
+                  <button
+                    type="button"
+                    className="manual-btn"
+                    aria-label="Baris bermasalah sebelumnya"
+                    disabled={errorRows.length < 2}
+                    onClick={() => stepError(-1)}
+                  >
+                    ‹
+                  </button>
+                  <button
+                    type="button"
+                    className="manual-fix-strip-current"
+                    onClick={() => control?.select(cursorRow)}
+                  >
+                    <span className="manual-fix-strip-pos">
+                      {(cursorAt + 1).toLocaleString("id-ID")}/
+                      {errorRows.length.toLocaleString("id-ID")}
+                    </span>
+                    <span>
+                      Baris {gridRowLabel(cursorRow)}
+                      {cursorError ? ` · ${cursorError.field}` : ""}
+                      {rowContext(cursorRow)
+                        ? ` · ${rowContext(cursorRow)}`
+                        : ""}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="manual-btn"
+                    aria-label="Baris bermasalah berikutnya"
+                    disabled={errorRows.length < 2}
+                    onClick={() => stepError(1)}
+                  >
+                    ›
+                  </button>
+                </div>
+              </div>
+            )}
+            {book && outside.length > 0 && (
+              <p role="status" className="manual-outside-book">
+                <span>
+                  <strong>
+                    {outside.length.toLocaleString("id-ID")} baris di luar buku{" "}
+                    {book.code}
+                  </strong>{" "}
+                  ({periodRangeLabel(book.periodStart, book.periodEnd)}),
+                  ditandai kuning. Saat disimpan, baris masuk ke buku sesuai
+                  tanggalnya, atau ditolak bila buku itu belum ada atau tutup.
+                </span>
+                <button
+                  type="button"
+                  className="manual-link-button"
+                  onClick={() => control?.select(outside[0]!.row)}
+                >
+                  Lihat baris {gridRowLabel(outside[0]!.row)} (
+                  {periodDateLabel(outside[0]!.date)})
+                </button>
+              </p>
+            )}
             <details className="manual-guide">
-              <summary>Cara mengisi</summary>
-              <p>
-                Klik sel Assignee untuk mencari nama, PIN, atau EID. Klik ikon
-                kalender di sel Shift Start atau Shift End untuk memilih tanggal
-                dan jam. Klik dua kali pada sel lain untuk mengubahnya. Gunakan
-                Salin dan Tempel untuk banyak baris sekaligus. Shift dan mesin
-                yang sudah tersimpan tidak dapat diubah.
-              </p>
-              <p>
-                Untuk mengunggah banyak baris sekaligus, isi sheet Data di{" "}
-                <a href="/templates/manual-data-template.xlsx" download>
-                  template Excel
-                </a>{" "}
-                lalu impor file .xlsx itu langsung lewat Impor file. Kolom
-                Assignee menerima PIN maupun EID. Urutannya: Shift Start, Shift
-                End, Station, Assignee, Width, Weft, Result. Petunjuk lengkap
-                ada di sheet Cara Pakai di file yang sama.
-              </p>
+              <summary>
+                <span className="manual-guide-label">Cara mengisi</span>
+              </summary>
+              <div className="manual-guide-body">
+                <p>
+                  Klik sel Assignee untuk mencari nama, PIN, atau EID. Klik ikon
+                  kalender di sel Shift Start atau Shift End untuk memilih
+                  tanggal dan jam. Klik dua kali pada sel lain untuk
+                  mengubahnya. Gunakan Salin dan Tempel untuk banyak baris
+                  sekaligus. Station pada baris tersimpan tidak dapat diubah;
+                  tanggal dan jam shift-nya boleh dikoreksi.
+                </p>
+                <p>
+                  Untuk mengunggah banyak baris sekaligus, isi sheet Data di{" "}
+                  <a href="/templates/manual-data-template.xlsx" download>
+                    template Excel
+                  </a>{" "}
+                  lalu impor file .xlsx itu langsung lewat Impor file. Kolom
+                  Assignee menerima PIN maupun EID. Urutannya: Shift Start,
+                  Shift End, Station, Assignee, Width, Weft, Result. Petunjuk
+                  lengkap ada di sheet Cara Pakai di file yang sama.
+                </p>
+              </div>
             </details>
           </div>
           {tabbed && (
@@ -2357,25 +3695,34 @@ function Workspace({
               aria-label="Kesalahan validasi"
               {...panelProps("errors")}
             >
-              {canEdit && (
-                <p className="manual-hint">
-                  Mengganti sebuah nilai menulis ulang semua baris yang isinya{" "}
-                  <b>sama persis</b>. Untuk Assignee, tulis PIN atau EID —
-                  namanya diisi otomatis.
-                </p>
-              )}
+              <h3 className="manual-errors-title">
+                Perlu diperbaiki
+                <span className="manual-error-count">
+                  {errors.length.toLocaleString("id-ID")} sel
+                </span>
+              </h3>
               <ul className="manual-error-groups">
                 {errorGroups.map((group) => (
                   <li key={group.message}>
                     <p className="manual-error-cause">
-                      <span>{group.message}</span>
+                      <span className="manual-error-field">{group.field}</span>
                       <span className="manual-error-count">
                         {group.count.toLocaleString("id-ID")} sel
                       </span>
                     </p>
+                    <p className="manual-error-message">{group.message}</p>
+                    {group.values.length > 0 && canEdit && (
+                      <p className="manual-hint manual-error-hint">
+                        Isi pengganti menulis ulang semua sel {group.field} yang
+                        isinya <b>sama persis</b>
+                        {group.field === "Assignee"
+                          ? " — tulis PIN atau EID, namanya diisi otomatis."
+                          : "."}
+                      </p>
+                    )}
                     {group.values.length > 0 ? (
                       <ul className="manual-fix-list">
-                        {group.values.map((item) => (
+                        {group.values.slice(0, FIX_VALUES_SHOWN).map((item) => (
                           <li key={item.key}>
                             <div className="manual-fix-head">
                               <code>{item.value}</code>
@@ -2467,6 +3814,16 @@ function Workspace({
                             )}
                           </li>
                         ))}
+                        {group.values.length > FIX_VALUES_SHOWN && (
+                          <li className="manual-hint">
+                            +
+                            {(
+                              group.values.length - FIX_VALUES_SHOWN
+                            ).toLocaleString("id-ID")}{" "}
+                            nilai lagi. Perbaiki yang di atas dulu; daftar ini
+                            diperbarui setelahnya.
+                          </li>
+                        )}
                       </ul>
                     ) : null}
                     {/*
@@ -2482,6 +3839,11 @@ function Workspace({
                       >
                         Lompat ke baris {gridRowLabel(group.firstRow)}
                       </button>
+                      {rowContext(group.firstRow) && (
+                        <span className="manual-group-context">
+                          {rowContext(group.firstRow)}
+                        </span>
+                      )}
                       {canEdit && (
                         <button
                           type="button"
@@ -2499,7 +3861,7 @@ function Workspace({
                             )
                           }
                         >
-                          Hapus {group.rows.size.toLocaleString("id-ID")} baris
+                          Hapus {group.rows.size.toLocaleString("id-ID")} baris…
                         </button>
                       )}
                     </p>
@@ -2561,7 +3923,7 @@ function Workspace({
                         !canEdit ||
                         !control ||
                         index === 3 ||
-                        (Boolean(row?.original) && index < 3)
+                        (Boolean(row?.original) && index === 2)
                       }
                       value={
                         index < 2
@@ -2597,14 +3959,280 @@ function Workspace({
               </button>
             </section>
           )}
+          {clipboard !== null && (
+            <section
+              id="manual-side-panel-paste"
+              ref={pastePanel}
+              className="manual-paste"
+              aria-label="Preview clipboard"
+              {...panelProps("paste")}
+            >
+              {/*
+                Paste keeps this step; a file import no longer has one. Pasting a
+                block into the middle of an existing sheet needs a target row and
+                column, and getting that wrong overwrites somebody's saved work. A
+                file import always starts at the first empty draft row, so there is
+                nothing to choose and nothing worth pausing for.
+              */}
+              <h3>Preview paste</h3>
+              <p>
+                Urutan: Shift Start, Shift End, Station, PIN, Width, Weft,
+                Result. Format waktu YYYY-MM-DD HH:mm; serial tanggal dari
+                spreadsheet akan dirapikan otomatis. Desimal memakai titik.
+                Maksimal {MAX_ROWS.toLocaleString("id-ID")} baris; lebih dari
+                itu pakai Impor file, yang langsung masuk ke grid.{" "}
+                <a href="/templates/manual-data-template.xlsx" download>
+                  Unduh template Excel
+                </a>
+              </p>
+              <div className="manual-toolbar">
+                <label>
+                  Baris tujuan
+                  {/* Numbered like the grid gutter (data row 1 sits under
+                      gutter 2), so the number typed is the number seen. */}
+                  <input
+                    type="number"
+                    min="2"
+                    max={MAX_ROWS + 1}
+                    value={pasteTarget.row + 1}
+                    onChange={(event) =>
+                      setPasteTarget({
+                        ...pasteTarget,
+                        row: Math.min(
+                          MAX_ROWS,
+                          Math.max(1, Number(event.target.value) - 1),
+                        ),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Kolom awal
+                  <select
+                    value={pasteTarget.column}
+                    onChange={(event) =>
+                      setPasteTarget({
+                        ...pasteTarget,
+                        column: Number(event.target.value),
+                      })
+                    }
+                  >
+                    {columns.map((label, index) => (
+                      <option key={label} value={index + 1}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label>
+                Isi clipboard (TSV)
+                <textarea
+                  value={clipboard}
+                  onChange={(event) => setClipboard(event.target.value)}
+                  rows={6}
+                />
+              </label>
+              <button
+                className="manual-btn manual-primary"
+                disabled={!canEdit}
+                onClick={() => void paste()}
+              >
+                Validasi & terapkan ke draft
+              </button>{" "}
+              <button
+                className="manual-btn"
+                onClick={() => {
+                  pasteAbort.current?.abort();
+                  setClipboard(null);
+                }}
+              >
+                Batal paste
+              </button>
+            </section>
+          )}
+          {/*
+            Where the page ends and how much room is left: paging, the rows
+            the sheet can still take, and "Tambah [1000] baris". It sat under
+            the grid, eating two bars of sheet height, while this column was
+            half empty. Pinned to the bottom of the column, so an open panel
+            above it scrolls and this stays put.
+          */}
+          <footer
+            className="manual-side-footer"
+            aria-label="Halaman dan kapasitas"
+          >
+            <div className="manual-capacity">
+              <div className="manual-capacity-label">
+                <span className="manual-capacity-title">
+                  Kapasitas draft
+                  {/*
+                    What to do when the workspace is full, next to the number
+                    that says so — not only in the refusal that shows up once
+                    it is already too late.
+                  */}
+                  <details className="manual-capacity-tip">
+                    <summary>
+                      <span aria-hidden="true">i</span>
+                      <span className="manual-visually-hidden">
+                        Tips saat kapasitas draft penuh
+                      </span>
+                    </summary>
+                    <div className="manual-capacity-tip-body">
+                      <strong>Kalau kapasitas draft penuh</strong>
+                      <p>
+                        Workspace menampung paling banyak{" "}
+                        {MAX_ROWS.toLocaleString("id-ID")} baris sekaligus.
+                        Kosongkan lagi dengan langkah ini:
+                      </p>
+                      <ol>
+                        <li>
+                          <b>Perbaiki sel merah</b>, lalu klik <b>Simpan</b>.
+                          Simpan ditolak selama masih ada sel yang salah.
+                        </li>
+                        <li>
+                          Klik <b>Muat ulang</b>. Workspace dibuka lagi hanya
+                          dengan satu halaman data tersimpan, jadi kapasitasnya
+                          kosong kembali. Data lama tetap bisa dibuka lewat
+                          Sebelumnya dan Berikutnya.
+                        </li>
+                        <li>
+                          Datanya sangat banyak? Pakai <b>Impor file</b>. File
+                          yang tidak muat di workspace otomatis dikirim langsung
+                          ke server per batch, tanpa batas baris.
+                        </li>
+                      </ol>
+                    </div>
+                  </details>
+                </span>
+                <span>
+                  {status.populated.toLocaleString("id-ID")} /{" "}
+                  {MAX_ROWS.toLocaleString("id-ID")} baris
+                </span>
+              </div>
+              <meter
+                className="manual-capacity-meter"
+                aria-label="Baris terisi dari kapasitas draft"
+                min={0}
+                max={MAX_ROWS}
+                high={MAX_ROWS * 0.9}
+                value={status.populated}
+              />
+              {status.populated >= MAX_ROWS * 0.9 && (
+                <p className="manual-capacity-warning" role="status">
+                  Hampir penuh. Simpan lalu muat ulang sebelum menambah data —
+                  lihat tips (i).
+                </p>
+              )}
+            </div>
+            <div className="manual-side-footer-head">
+              <span>
+                Halaman {pageNumber} · {entries.length.toLocaleString("id-ID")}{" "}
+                baris tersimpan
+              </span>
+            </div>
+            <div className="manual-pager">
+              <button
+                className="manual-btn"
+                disabled={!onPrevious || busy}
+                onClick={() => navigate(onPrevious)}
+              >
+                <span aria-hidden="true">‹ </span>Sebelumnya
+              </button>
+              <select
+                aria-label="Baris per halaman"
+                className="manual-page-size"
+                value={pageSize}
+                disabled={busy}
+                onChange={(event) => {
+                  const size = Number(event.target.value);
+                  void navigate(() => onPageSize(size));
+                }}
+              >
+                {[100, 250, 500].map((size) => (
+                  <option key={size} value={size}>
+                    {size} / halaman
+                  </option>
+                ))}
+              </select>
+              <button
+                className="manual-btn"
+                disabled={!onNext || busy}
+                onClick={() => navigate(onNext)}
+              >
+                Berikutnya<span aria-hidden="true"> ›</span>
+              </button>
+            </div>
+            {canWrite && (
+              <form
+                className="manual-add-rows"
+                aria-label="Tambah baris kosong di bawah"
+                // Our own message for 0 or blank, not the browser's bubble.
+                noValidate
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!control || !canEdit) return;
+                  const wanted = Math.floor(addRowCount);
+                  if (!Number.isFinite(wanted) || wanted < 1) {
+                    failNotice("Isi jumlah baris minimal 1.");
+                    return;
+                  }
+                  const added = control.appendRows(wanted);
+                  if (added === 0)
+                    failNotice(
+                      `Workspace sudah mencapai kapasitas ${MAX_ROWS.toLocaleString("id-ID")} baris. Simpan lalu muat ulang.`,
+                    );
+                  else
+                    setNotice(
+                      added < wanted
+                        ? `${added.toLocaleString("id-ID")} baris ditambahkan — kapasitas ${MAX_ROWS.toLocaleString("id-ID")} baris tercapai.`
+                        : `${added.toLocaleString("id-ID")} baris kosong ditambahkan di bawah.`,
+                    );
+                }}
+              >
+                <button
+                  type="submit"
+                  className="manual-btn"
+                  disabled={!canEdit || !control}
+                >
+                  Tambah
+                </button>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  aria-label="Jumlah baris yang ditambahkan"
+                  // "1.000", like every other count in this column.
+                  value={
+                    Number.isFinite(addRowCount)
+                      ? addRowCount.toLocaleString("id-ID")
+                      : ""
+                  }
+                  disabled={!canEdit || !control}
+                  onChange={(event) => {
+                    const digits = event.target.value.replace(/\D/g, "");
+                    setAddRowCount(
+                      digits ? Math.min(MAX_ROWS, Number(digits)) : Number.NaN,
+                    );
+                  }}
+                />
+                <span aria-hidden="true">baris kosong</span>
+              </form>
+            )}
+          </footer>
         </div>
       </div>
-      {attempt && !mutation.isPending && (
+      {attempt && !mutation.isPending && !saving && (
         <div className="manual-error">
           Hasil simpan belum pasti. Editing ditahan agar retry memakai payload
           dan kunci yang sama.{" "}
           <button className="manual-btn" onClick={() => void save(attempt)}>
             Ulangi simpan yang sama
+          </button>{" "}
+          <button
+            className="manual-btn manual-danger-quiet"
+            onClick={() => void discardAttempt()}
+          >
+            Buang percobaan & muat ulang
           </button>
         </div>
       )}
@@ -2644,14 +4272,20 @@ function Workspace({
                 {bulkImport.summary.unknownColumns.length
                   ? ` Kolom diabaikan: ${bulkImport.summary.unknownColumns.join(", ")}.`
                   : ""}
+                {bulkImport.summary.skippedBeforeHeader
+                  ? ` ${bulkImport.summary.skippedBeforeHeader} baris di atas judul kolom dilewati.`
+                  : ""}
               </p>
               {bulkImport.summary.rejections.length > 0 && (
                 <>
                   <ul className="manual-errors">
                     {bulkImport.summary.rejections.slice(0, 20).map((item) => (
                       <li key={`${item.row}-${item.field}-${item.message}`}>
-                        Baris {gridRowLabel(item.row)} · {item.field}:{" "}
-                        {item.message}
+                        {/* Nomor baris FILE, bukan nomor grid: baris ini
+                            tidak pernah ada di grid, dan yang dicari orang
+                            adalah barisnya di spreadsheet asal. */}
+                        Baris file {item.row.toLocaleString("id-ID")} ·{" "}
+                        {item.field}: {item.message}
                       </li>
                     ))}
                   </ul>
@@ -2698,91 +4332,6 @@ function Workspace({
             }}
           >
             {bulkImport.running ? "Hentikan" : "Tutup"}
-          </button>
-        </section>
-      )}
-      {clipboard !== null && (
-        <section className="manual-paste" aria-label="Preview clipboard">
-          {/*
-            Paste keeps this step; a file import no longer has one. Pasting a
-            block into the middle of an existing sheet needs a target row and
-            column, and getting that wrong overwrites somebody's saved work. A
-            file import always starts at the first empty draft row, so there is
-            nothing to choose and nothing worth pausing for.
-          */}
-          <h3>Preview paste</h3>
-          <p>
-            Urutan: Shift Start, Shift End, Station, PIN, Width, Weft, Result.
-            Format waktu YYYY-MM-DD HH:mm; serial tanggal dari spreadsheet akan
-            dirapikan otomatis. Desimal memakai titik. Maksimal{" "}
-            {MAX_ROWS.toLocaleString("id-ID")} baris; lebih dari itu pakai Impor
-            file, yang langsung masuk ke grid.{" "}
-            <a href="/templates/manual-data-template.xlsx" download>
-              Unduh template Excel
-            </a>
-          </p>
-          <div className="manual-toolbar">
-            <label>
-              Baris tujuan
-              <input
-                type="number"
-                min="1"
-                max={MAX_ROWS}
-                value={pasteTarget.row}
-                onChange={(event) =>
-                  setPasteTarget({
-                    ...pasteTarget,
-                    row: Math.min(
-                      MAX_ROWS,
-                      Math.max(1, Number(event.target.value)),
-                    ),
-                  })
-                }
-              />
-            </label>
-            <label>
-              Kolom awal
-              <select
-                value={pasteTarget.column}
-                onChange={(event) =>
-                  setPasteTarget({
-                    ...pasteTarget,
-                    column: Number(event.target.value),
-                  })
-                }
-              >
-                {columns.map((label, index) => (
-                  <option key={label} value={index + 1}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <label>
-            Isi clipboard (TSV)
-            <textarea
-              value={clipboard}
-              onChange={(event) => setClipboard(event.target.value)}
-              rows={6}
-            />
-          </label>
-          <button
-            className="manual-btn manual-primary"
-            disabled={!canEdit}
-            onClick={() => void paste()}
-          >
-            Validasi & terapkan ke draft
-          </button>{" "}
-          <button
-            className="manual-btn"
-            onClick={() => {
-              pasteAbort.current?.abort();
-              setClipboard(null);
-              setErrors([]);
-            }}
-          >
-            Batal paste
           </button>
         </section>
       )}
@@ -2841,8 +4390,26 @@ function Workspace({
           setVoidAttempt(null);
           setVoidError("");
         }}
+        onAbandon={() => void abandonVoid()}
         onConfirm={(reason) => void submitVoid(reason)}
       />
     </section>
   );
+}
+
+interface ImportUndo {
+  /** Nama file (dan sheet) untuk pesan. */
+  source: string;
+  /** Baris sheet pertama yang ditulis impor (1-based). */
+  row: number;
+  /** Isi tiap baris rentang sebelum impor, beserta baseline tersimpannya. */
+  before: { cells: string[]; original: DraftRow["original"] }[];
+  /** Isi yang ditulis impor, untuk tahu baris mana yang diubah sesudahnya. */
+  written: string[][];
+  /** Kunci baris grid di rentang itu, saat impor. */
+  keys: string[];
+}
+
+function importEnd(undo: ImportUndo) {
+  return undo.row + undo.keys.length - 1;
 }

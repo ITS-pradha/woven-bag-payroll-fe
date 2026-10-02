@@ -8,6 +8,11 @@ interface VoidProductionDialogProps {
   mustRetry: boolean;
   error: string;
   onCancel(): void;
+  /**
+   * Closes after an unknown outcome. The caller reloads from the server: the
+   * void may or may not have landed, and only a fresh read can tell.
+   */
+  onAbandon(): void;
   onConfirm(reason: string): void;
 }
 
@@ -18,6 +23,7 @@ export function VoidProductionDialog({
   mustRetry,
   error,
   onCancel,
+  onAbandon,
   onConfirm,
 }: VoidProductionDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -89,17 +95,18 @@ export function VoidProductionDialog({
           {mustRetry && (
             <p>
               Hasil permintaan belum pasti. Ulangi dengan data yang sama agar
-              server tidak membatalkan dua kali.
+              server tidak membatalkan dua kali — atau tutup, lalu data dimuat
+              ulang untuk melihat apakah baris ini sudah dibatalkan.
             </p>
           )}
           <div className="manual-dialog-actions">
             <button
               type="button"
               className="manual-btn"
-              disabled={pending || mustRetry}
-              onClick={onCancel}
+              disabled={pending}
+              onClick={mustRetry ? onAbandon : onCancel}
             >
-              Kembali
+              {mustRetry ? "Tutup & muat ulang" : "Kembali"}
             </button>
             <button
               type="submit"

@@ -21,6 +21,12 @@ import {
 } from "../api/rates-queries";
 import { LiveEditConfirm } from "./live-edit-confirm";
 import { RateStatusBadge } from "./rate-status-badge";
+import {
+  PanelSkeleton,
+  TableSkeleton,
+} from "../../../components/skeleton/skeleton";
+import { EmptyState } from "../../../components/empty-state/empty-state";
+import { StationsEmptyBackdrop } from "./rates-empty-backdrop";
 
 interface StationGroupManagerProps {
   canWrite: boolean;
@@ -49,7 +55,13 @@ export function StationGroupManager(props: StationGroupManagerProps) {
       className="min-w-0 space-y-2"
       aria-labelledby="station-group-title"
     >
-      <div className="flex flex-wrap items-end gap-2 border border-border bg-surface px-3 py-2">
+      {/* No version yet: an empty picker says nothing, and the first
+          version's button lives in the empty state below. Kept while the
+          form is open so it can be closed. */}
+      <div
+        hidden={query.isSuccess && versions.length === 0 && !creating}
+        className="flex flex-wrap items-end gap-2 border border-border bg-surface px-3 py-2"
+      >
         <label className="mr-auto min-w-64 text-[0.6875rem] font-semibold">
           <span id="station-group-title">Versi kelompok mesin</span>
           <select
@@ -100,7 +112,7 @@ export function StationGroupManager(props: StationGroupManagerProps) {
         />
       ) : null}
       {query.isPending ? (
-        <StationState label="Memuat versi kelompok mesin…" />
+        <PanelSkeleton label="Memuat versi kelompok mesin" lines={3} />
       ) : null}
       {query.isError ? (
         <StationState
@@ -108,17 +120,41 @@ export function StationGroupManager(props: StationGroupManagerProps) {
           retry={() => void query.refetch()}
         />
       ) : null}
-      {!query.isPending && !query.isError && versions.length === 0 ? (
-        <div className="border border-border bg-surface p-6 text-center">
-          <h2 className="text-sm font-bold">Belum ada kelompok mesin</h2>
-          <p className="mt-1 text-xs text-muted">
-            Buat versi pertama untuk memetakan nomor station ke Regular, CS,
-            atau SP.
-          </p>
-        </div>
+      {!query.isPending &&
+      !query.isError &&
+      versions.length === 0 &&
+      !creating ? (
+        <EmptyState
+          id="station-groups-empty"
+          icon="stations"
+          title="Belum ada kelompok mesin"
+          description="Buat versi pertama untuk memetakan nomor station ke Regular, CS, atau SP."
+          action={
+            props.canWrite ? (
+              <button
+                type="button"
+                className="empty-state-primary"
+                onClick={() => setCreating(true)}
+              >
+                Buat versi mapping pertama
+              </button>
+            ) : (
+              <span className="empty-state-note">
+                Minta pengguna dengan izin tulis membuat versi pertama.
+              </span>
+            )
+          }
+          backdrop={<StationsEmptyBackdrop />}
+          fill
+        />
       ) : null}
       {selected && details.isPending ? (
-        <StationState label="Memuat mapping station…" />
+        <TableSkeleton
+          label="Memuat mapping station"
+          height="24rem"
+          columns={[8, 52, 34, 10]}
+          align={["center", "start", "start", "center"]}
+        />
       ) : null}
       {details.isError ? (
         <StationState

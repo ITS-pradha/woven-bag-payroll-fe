@@ -48,6 +48,12 @@ export function EmployeeCombobox({
     retry: false,
   });
   const data = employees.data?.data ?? [];
+  /**
+   * The list answers the text in the box. While the debounce or the request
+   * is still catching up it answers the previous text, and Enter would pick
+   * that list's first row — an employee nobody searched for.
+   */
+  const settled = value.trim() === debounced && !employees.isFetching;
 
   function choose(employee: Employee) {
     // The PIN, not the name: the grid resolves identities, and a name is not
@@ -105,9 +111,10 @@ export function EmployeeCombobox({
           // Enter picks the highlighted employee instead of submitting the
           // form it sits in — applying a half-typed search would rewrite every
           // matching cell with nonsense.
-          if (event.key === "Enter" && open && data[active]) {
+          if (event.key === "Enter" && open) {
             event.preventDefault();
-            choose(data[active]);
+            const employee = data[active];
+            if (settled && employee) choose(employee);
           }
         }}
       />

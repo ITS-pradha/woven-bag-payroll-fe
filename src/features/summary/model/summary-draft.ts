@@ -8,30 +8,6 @@ export { formatRupiah } from "../../../lib/format-money";
 
 export type OverrideField = "basePay" | "bonusPay";
 
-function isoDate(year: number, monthIndex: number, day: number) {
-  const date = new Date(Date.UTC(year, monthIndex, day));
-  return date.toISOString().slice(0, 10);
-}
-
-export function defaultPayrollPeriod(referenceDate: string) {
-  const [yearText, monthText, dayText] = referenceDate.split("-");
-  const year = Number(yearText);
-  const monthIndex = Number(monthText) - 1;
-  const day = Number(dayText);
-  if (
-    !Number.isInteger(year) ||
-    !Number.isInteger(monthIndex) ||
-    !Number.isInteger(day)
-  )
-    throw new Error("Tanggal acuan payroll tidak valid.");
-
-  const startMonth = day >= 24 ? monthIndex : monthIndex - 1;
-  return {
-    periodStart: isoDate(year, startMonth, 24),
-    periodEnd: isoDate(year, startMonth + 1, 23),
-  };
-}
-
 export function normalizeMoneyInput(raw: string): string | null {
   const cleaned = raw
     .trim()

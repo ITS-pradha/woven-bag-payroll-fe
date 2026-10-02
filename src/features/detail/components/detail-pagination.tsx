@@ -10,7 +10,7 @@ export function DetailPagination({
   onNext: () => void;
 }) {
   return (
-    <footer className="flex items-center justify-end gap-2 border-x border-b border-border bg-surface px-2 py-1 text-[0.6875rem]">
+    <footer className="sticky bottom-0 z-10 shadow-[0_-4px_8px_-6px_rgb(15_23_42/0.25)] flex items-center justify-end gap-2 border-x border-b border-border bg-surface px-2 py-1 text-[0.6875rem]">
       <span>Halaman {pageIndex + 1}</span>
       <button
         type="button"

@@ -277,6 +277,63 @@ test("menu Detail dapat mencari karyawan berdasarkan nama", async ({
   await expect(page).toHaveURL(new RegExp(`run=${runId}.*pin=${pin}`));
 });
 
+test("klik kolom Cari karyawan langsung membuka daftar, juga setelah memilih", async ({
+  page,
+}) => {
+  const other = {
+    ...employeeSummary,
+    pin: "1501",
+    employeeName: "Mokhamad Imam Gozali",
+  };
+  const queries: string[] = [];
+  await page.route(`**/payroll-runs/${runId}/summaries?*`, async (route) => {
+    const query =
+      new URL(route.request().url()).searchParams.get("query") ?? "";
+    queries.push(query);
+    const everyone = [employeeSummary, other];
+    await route.fulfill({
+      json: {
+        data: query
+          ? everyone.filter((employee) => employee.employeeName.includes(query))
+          : everyone,
+        page: { pageSize: 20, hasNextPage: false, nextCursor: null },
+        aggregate: {
+          totalBasePay: employeeSummary.basePay,
+          totalBonusPay: employeeSummary.bonusPay,
+          totalPay: employeeSummary.totalPay,
+          totalWorkingDays: employeeSummary.workingDays,
+        },
+      },
+    });
+  });
+  await page.goto("/detail");
+  const search = page.getByRole("combobox", { name: "Cari karyawan" });
+  const list = page.getByRole("listbox", {
+    name: "Karyawan dalam payroll run",
+  });
+
+  // Focus alone opens the list — no typing needed.
+  await search.click();
+  await expect(list.getByRole("option")).toHaveCount(2);
+  await list.getByRole("option", { name: /Mokhamad Imam Gozali/ }).click();
+  await expect(list).toHaveCount(0);
+  await expect(search).toHaveValue("Mokhamad Imam Gozali");
+
+  // Clicking the box again, while it still has focus, reopens it — with
+  // everyone in the run, not just the name already in the box.
+  await search.click();
+  await expect(list.getByRole("option")).toHaveCount(2);
+  await expect(
+    list.getByRole("option", { name: /Mokhamad Imam Gozali/ }),
+  ).toHaveAttribute("aria-selected", "true");
+
+  // Typing replaces the chosen name rather than appending to it.
+  await page.keyboard.type("Koma");
+  await expect(search).toHaveValue("Koma");
+  await expect(list.getByRole("option")).toHaveCount(1);
+  expect(queries).toContain("Koma");
+});
+
 test("Detail tidak membuat halaman melebar pada viewport target", async ({
   page,
 }) => {
@@ -297,5 +354,92 @@ test("Detail tidak membuat halaman melebar pada viewport target", async ({
       ),
       `viewport ${viewport.width}px`,
     ).toBe(false);
+  }
+});
+
+test("tanpa payroll, Detail menunjukkan satu langkah: buka Summary", async ({
+  page,
+}) => {
+  await page.route("**/payroll-runs?pageSize=25", (route) =>
+    route.fulfill({
+      json: {
+        data: [],
+        page: { pageSize: 25, hasNextPage: false, nextCursor: null },
+      },
+    }),
+  );
+  await page.goto("/detail");
+  const empty = page.getByRole("region", { name: "Belum ada payroll" });
+  await expect(empty).toBeVisible();
+  // The run picker and employee search have nothing to offer yet.
+  await expect(page.getByLabel("Pilih payroll run")).toHaveCount(0);
+  for (const [name, width, height] of [
+    ["desktop", 1440, 900],
+    ["mobile", 390, 780],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    await page.screenshot({ path: `test-results/empty-detail-${name}.png` });
+  }
+  await empty.getByRole("link", { name: "Buka Summary" }).click();
+  await expect(page).toHaveURL(/\/summary/);
+});
+
+test("pagination Detail menempel di bawah layar saat rincian produksinya panjang", async ({
+  page,
+}) => {
+  const line = {
+    productionEntryId: "71000000-0000-4000-8000-000000000001",
+    productionRowVersion: 1,
+    pin,
+    sourceType: "MANUAL",
+    shiftStart: "2026-08-24T07:00:00+07:00",
+    shiftEnd: "2026-08-24T19:00:00+07:00",
+    widthCm: "75",
+    weftDensity: "9.7",
+    resultMeter: "1052",
+    durationHours: "12",
+    targetMeter: "1328.22",
+    payRatePerMeter: "55.36",
+    calculatedBasePay: "58240",
+    calculatedBonusPay: "0",
+    calculatedTotalPay: "58240",
+    appliedPayRateId: "72000000-0000-4000-8000-000000000001",
+    rateVersionCode: "HB-CS-2026-V2",
+    calculationTrace: { formula: "1052 × 55.36" },
+  };
+  await page.route(
+    `**/payroll-runs/${runId}/pins/${pin}/production-lines?*`,
+    (route) =>
+      route.fulfill({
+        json: {
+          data: Array.from({ length: 60 }, (_, index) => ({
+            ...line,
+            id: `70000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+            stationNo: index + 1,
+          })),
+          page: { pageSize: 100, hasNextPage: true, nextCursor: "next" },
+        },
+      }),
+  );
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1024, height: 768 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(`/detail?run=${runId}&pin=${pin}`);
+    await expect(
+      page.getByRole("table", { name: "Rincian produksi Komariyah" }),
+    ).toBeVisible();
+    const pager = page.locator("footer").filter({ hasText: "Berikutnya" });
+    for (const scroll of [0, 800]) {
+      await page.mouse.wheel(0, scroll);
+      await expect(pager).toBeInViewport();
+      const box = (await pager.boundingBox())!;
+      expect(box.y + box.height).toBeGreaterThan(viewport.height - 4);
+      expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
+    }
+    await page.screenshot({
+      path: `test-results/detail-sticky-${viewport.width}.png`,
+    });
   }
 });

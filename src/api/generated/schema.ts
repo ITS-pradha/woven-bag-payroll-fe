@@ -105,7 +105,7 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List Manual Data dan hasil commit LDMS
+         * List Manual Data
          * @description Urutan default `shiftStart DESC, stationNo ASC, id ASC`.
          */
         get: operations["listProductionEntries"];
@@ -167,77 +167,6 @@ export interface paths {
         put?: never;
         /** Void baris produksi tanpa menghapus histori */
         post: operations["voidProductionEntry"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/ldms-imports": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Upload export LDMS untuk validasi asinkron
-         * @description Belum mengubah Manual Data sampai endpoint commit dipanggil.
-         */
-        post: operations["createLdmsImport"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/ldms-imports/{importId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Poll status validasi atau commit LDMS */
-        get: operations["getLdmsImport"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/ldms-imports/{importId}/rows": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Preview hasil per baris sebelum commit */
-        get: operations["listLdmsImportRows"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/ldms-imports/{importId}/commits": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Commit preview LDMS ke sumber utama Manual Data */
-        post: operations["commitLdmsImport"];
         delete?: never;
         options?: never;
         head?: never;
@@ -511,6 +440,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/payroll-periods/{payrollPeriodId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Ubah kode dan rentang tanggal buku periode
+         * @description Mengganti `code`, `periodStart`, dan `periodEnd` buku yang masih OPEN.
+         *     `departmentCode` dan `status` tidak bisa diubah lewat endpoint ini.
+         *     Optimistic concurrency lewat `expectedRowVersion`; versi naik satu
+         *     hanya bila ada nilai yang benar-benar berubah.
+         *
+         *     Ditolak:
+         *     - `409 ROW_VERSION_CONFLICT` bila `expectedRowVersion` sudah usang
+         *       (`details.currentRowVersion`).
+         *     - `409 PAYROLL_PERIOD_ALREADY_CLOSED` bila buku sudah CLOSED.
+         *     - `409 PAYROLL_PERIOD_CODE_TAKEN` bila kode dipakai buku lain.
+         *     - `409 PAYROLL_PERIOD_OVERLAP` bila rentang baru bertumpuk dengan buku
+         *       lain (lintas departemen, sama seperti saat membuat buku).
+         *     - `409 PAYROLL_PERIOD_HAS_RUNS` bila tanggal berubah sementara buku
+         *       punya payroll run di luar FAILED/CANCELLED — run itu dihitung dari
+         *       rentang lama.
+         *     - `409 PAYROLL_PERIOD_ROWS_UNCOVERED` bila rentang baru meninggalkan
+         *       baris produksi ACTIVE (tanggal `shiftStart` WIB) yang tidak lagi
+         *       tercakup buku mana pun. `details.rowCount` dan `details.dates`
+         *       (paling banyak 10 tanggal pertama).
+         */
+        patch: operations["updatePayrollPeriod"];
+        trace?: never;
+    };
     "/payroll-periods/{payrollPeriodId}/closures": {
         parameters: {
             query?: never;
@@ -523,7 +490,7 @@ export interface paths {
         /**
          * Tutup buku periode
          * @description Mengubah periode OPEN menjadi CLOSED. Buku yang tutup menolak semua
-         *     tulis produksi (batch, PATCH, void, commit LDMS) dan generate payroll
+         *     tulis produksi (batch, PATCH, void) dan generate payroll
          *     baru. Tidak bisa dibuka kembali; koreksi setelahnya lewat
          *     payroll adjustment. Ditolak `409 PAYROLL_PERIOD_ALREADY_CLOSED` bila
          *     sudah tutup, dan `409 PAYROLL_PERIOD_HAS_UNFINISHED_RUNS` selama masih
@@ -786,8 +753,6 @@ export interface components {
         /** @enum {string} */
         BatchOutcome: "INSERTED" | "UPDATED" | "UNCHANGED" | "REJECTED";
         /** @enum {string} */
-        ImportStatus: "VALIDATING" | "READY" | "COMMITTING" | "COMMITTED" | "PARTIAL" | "FAILED";
-        /** @enum {string} */
         SyncStatus: "QUEUED" | "SYNCING" | "COMPLETED" | "FAILED";
         /** @enum {string} */
         AttendancePeriodStatus: "SYNCING" | "FINAL" | "SUPERSEDED" | "REVOKED" | "FAILED";
@@ -889,7 +854,7 @@ export interface components {
             widthCm: components["schemas"]["NonNegativeDecimalString"];
             weftDensity: components["schemas"]["NonNegativeDecimalString"];
             resultMeter: components["schemas"]["NonNegativeDecimalString"];
-            /** @description Metadata internal hasil import LDMS; UI Manual Data boleh mengabaikan field ini. */
+            /** @description Metadata internal batch terakhir yang menulis baris ini; UI Manual Data boleh mengabaikan field ini. */
             machineRuntimeMinutes?: components["schemas"]["NonNegativeDecimalString"] | null;
             /** @description Persentase runtime LDMS untuk normalisasi durasi server-side. */
             machineRuntimePercent?: components["schemas"]["NonNegativeDecimalString"] | null;
@@ -914,7 +879,7 @@ export interface components {
         ProductionEntryListResponse: {
             data: components["schemas"]["ProductionEntry"][];
             page: components["schemas"]["CursorPage"];
-            /** @description Revision untuk mendeteksi preview LDMS yang stale. */
+            /** @description Revision untuk mendeteksi grid Manual Data yang stale. */
             sourceRevision: string;
         };
         ProductionEntryBatchRequest: {
@@ -958,34 +923,6 @@ export interface components {
             /** Format: int64 */
             expectedRowVersion: number;
             reason: string;
-        };
-        LdmsImport: {
-            /** Format: uuid */
-            importId: string;
-            fileName: string;
-            status: components["schemas"]["ImportStatus"];
-            counts: components["schemas"]["BatchCounts"];
-            rowCount?: number;
-            sourceRevision: string;
-            /** Format: date-time */
-            createdAt: string;
-            /** Format: date-time */
-            validatedAt?: string | null;
-            /** Format: date-time */
-            committedAt?: string | null;
-            statusUrl: string;
-            failure?: components["schemas"]["ApiErrorEnvelope"] | null;
-        };
-        LdmsImportRow: {
-            sourceRowNo: number;
-            outcome: components["schemas"]["BatchOutcome"];
-            candidate: components["schemas"]["ProductionEntryInput"];
-            current?: components["schemas"]["ProductionEntry"] | null;
-            fieldErrors?: components["schemas"]["FieldError"][];
-        };
-        LdmsImportRowListResponse: {
-            data: components["schemas"]["LdmsImportRow"][];
-            page: components["schemas"]["CursorPage"];
         };
         CreateHrisSyncRequest: {
             /** Format: date */
@@ -1331,6 +1268,8 @@ export interface components {
             /** @example LOOM */
             departmentCode: string;
             status: components["schemas"]["PayrollPeriodStatus"];
+            /** Format: int64 */
+            rowVersion: number;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -1347,6 +1286,15 @@ export interface components {
             /** Format: date */
             periodEnd: string;
             departmentCode: string;
+        };
+        UpdatePayrollPeriodRequest: {
+            /** Format: int64 */
+            expectedRowVersion: number;
+            code: string;
+            /** Format: date */
+            periodStart: string;
+            /** Format: date */
+            periodEnd: string;
         };
         PayrollRun: {
             /** Format: uuid */
@@ -1593,7 +1541,6 @@ export interface components {
         PayrollPeriodIdPath: string;
         PinPath: string;
         ProductionEntryIdPath: string;
-        ImportIdPath: string;
         SyncIdPath: string;
         AttendancePeriodIdPath: string;
         RateVersionIdPath: string;
@@ -1883,133 +1830,6 @@ export interface operations {
                 };
             };
             409: components["responses"]["ErrorResponse"];
-            default: components["responses"]["ErrorResponse"];
-        };
-    };
-    createLdmsImport: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description UUID unik per logical mutation; retry harus memakai key dan payload yang sama. */
-                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "multipart/form-data": {
-                    /** Format: binary */
-                    file: string;
-                };
-            };
-        };
-        responses: {
-            /** @description Upload diterima dan validasi dijadwalkan */
-            202: {
-                headers: {
-                    Location?: string;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LdmsImport"];
-                };
-            };
-            413: components["responses"]["ErrorResponse"];
-            default: components["responses"]["ErrorResponse"];
-        };
-    };
-    getLdmsImport: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                importId: components["parameters"]["ImportIdPath"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Status dan aggregate hasil import */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LdmsImport"];
-                };
-            };
-            404: components["responses"]["ErrorResponse"];
-            default: components["responses"]["ErrorResponse"];
-        };
-    };
-    listLdmsImportRows: {
-        parameters: {
-            query?: {
-                outcome?: components["schemas"]["BatchOutcome"];
-                pageSize?: components["parameters"]["PageSize"];
-                /** @description Cursor opaque dari response sebelumnya. */
-                after?: components["parameters"]["AfterCursor"];
-            };
-            header?: never;
-            path: {
-                importId: components["parameters"]["ImportIdPath"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Preview terpaginasikan */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LdmsImportRowListResponse"];
-                };
-            };
-            default: components["responses"]["ErrorResponse"];
-        };
-    };
-    commitLdmsImport: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description UUID unik per logical mutation; retry harus memakai key dan payload yang sama. */
-                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
-            };
-            path: {
-                importId: components["parameters"]["ImportIdPath"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    /** @description Revision Manual Data yang dipakai saat preview. */
-                    expectedSourceRevision: string;
-                };
-            };
-        };
-        responses: {
-            /** @description Commit dijadwalkan */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LdmsImport"];
-                };
-            };
-            /** @description Preview stale atau import sudah di-commit */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiErrorEnvelope"];
-                };
-            };
             default: components["responses"]["ErrorResponse"];
         };
     };
@@ -2584,6 +2404,36 @@ export interface operations {
                 };
             };
             409: components["responses"]["ErrorResponse"];
+            default: components["responses"]["ErrorResponse"];
+        };
+    };
+    updatePayrollPeriod: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                payrollPeriodId: components["parameters"]["PayrollPeriodIdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdatePayrollPeriodRequest"];
+            };
+        };
+        responses: {
+            /** @description Buku setelah diubah */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PayrollPeriod"];
+                };
+            };
+            404: components["responses"]["ErrorResponse"];
+            409: components["responses"]["ErrorResponse"];
+            422: components["responses"]["ErrorResponse"];
             default: components["responses"]["ErrorResponse"];
         };
     };

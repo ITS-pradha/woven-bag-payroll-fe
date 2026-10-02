@@ -1,4 +1,9 @@
 import type { ReactNode } from "react";
+import {
+  PanelSkeleton,
+  TableSkeleton,
+} from "../../../components/skeleton/skeleton";
+import { PRODUCTION_COLUMNS } from "../model/table-layout";
 
 export function DetailTabButton({
   active,
@@ -40,10 +45,11 @@ export function DetailLineState({
 }) {
   if (pending)
     return (
-      <div
-        aria-busy="true"
-        aria-label="Memuat rincian"
-        className="min-h-64 flex-1 animate-pulse border border-border bg-surface-muted"
+      <TableSkeleton
+        label="Memuat rincian"
+        className="min-h-64 flex-1"
+        columns={PRODUCTION_COLUMNS}
+        align={PRODUCTION_ALIGN}
       />
     );
   if (error) return <DetailError onRetry={onRetry} />;
@@ -56,13 +62,34 @@ export function DetailLineState({
   return children;
 }
 
+const PRODUCTION_ALIGN: ("start" | "end" | "center")[] = [
+  "start",
+  "start",
+  "end",
+  "end",
+  "end",
+  "end",
+  "end",
+  "end",
+  "end",
+  "end",
+  "end",
+  "end",
+  "start",
+  "center",
+];
+
 export function DetailLoading() {
   return (
-    <div
-      aria-busy="true"
-      aria-label="Memuat detail payroll"
-      className="h-64 animate-pulse border border-border bg-surface-muted"
-    />
+    <div className="flex flex-col gap-1.5">
+      <PanelSkeleton lines={1} className="min-h-0" />
+      <TableSkeleton
+        label="Memuat detail payroll"
+        height="24rem"
+        columns={PRODUCTION_COLUMNS}
+        align={PRODUCTION_ALIGN}
+      />
+    </div>
   );
 }
 

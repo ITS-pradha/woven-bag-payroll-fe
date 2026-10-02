@@ -100,6 +100,7 @@ test.beforeEach(async ({ page }) => {
             departmentCode: "LOOM",
             status: "OPEN",
             createdAt,
+            rowVersion: 1,
             closedAt: null,
           },
         ],
@@ -356,10 +357,97 @@ test("generate ulang membuat run baru dari buku dan attendance run terpilih", as
     .getByRole("button", { name: "Generate ulang" })
     .click();
   await expect(page).toHaveURL(new RegExp(`run=${nextId}`));
-  await expect(page.getByText("Run #2 masuk antrean")).toBeVisible();
-  // Buku dan attendance diambil dari run sumber, bukan dari isian tanggal.
+  const progress = page.getByRole("dialog", {
+    name: "Payroll selesai dihitung",
+  });
+  await expect(progress).toBeVisible();
+  await expect(progress).toContainText("Run #2");
+  await progress.getByRole("button", { name: "Selesai" }).click();
+  await expect(progress).toBeHidden();
+  // Buku dan attendance diambil dari run sumber, bukan dari pilihan buku.
   expect(bodies).toEqual([{ periodId, attendancePeriodId: attendanceId }]);
   expect(keys[0]).toBeTruthy();
+});
+
+test("generate memakai buku periode yang dipilih, tanpa isian tanggal", async ({
+  page,
+}) => {
+  const augustId = "40000000-0000-4000-8000-000000000002";
+  const queried: string[] = [];
+  let body: unknown;
+  await page.route("**/payroll-periods?*", (route) =>
+    route.fulfill({
+      json: {
+        data: [
+          {
+            id: augustId,
+            code: "KARUNG-2026-08",
+            periodStart: "2026-07-24",
+            periodEnd: "2026-08-23",
+            departmentCode: "KARUNG",
+            status: "OPEN",
+            createdAt,
+            rowVersion: 1,
+            closedAt: null,
+          },
+          {
+            id: periodId,
+            code: "KARUNG-2026-09",
+            periodStart: "2026-08-24",
+            periodEnd: "2026-09-23",
+            departmentCode: "KARUNG",
+            status: "OPEN",
+            createdAt,
+            rowVersion: 1,
+            closedAt: null,
+          },
+        ],
+        page: { pageSize: 200, hasNextPage: false, nextCursor: null },
+      },
+    }),
+  );
+  await page.route("**/attendance-periods?*", (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    queried.push(`${query.get("periodStart")}..${query.get("periodEnd")}`);
+    return route.fulfill({
+      json: {
+        data: [
+          {
+            id: attendanceId,
+            periodStart: query.get("periodStart"),
+            periodEnd: query.get("periodEnd"),
+            departmentCode: "LOOM",
+            hrisRevision: 3,
+            status: "FINAL",
+            finalizedAt: createdAt,
+            finalizedBy: "HRD",
+            checksum: "final-r3",
+            recordCount: 48,
+            syncedAt: createdAt,
+          },
+        ],
+        page: { pageSize: 100, hasNextPage: false, nextCursor: null },
+      },
+    });
+  });
+  await page.route("**/payroll-runs", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    body = await route.request().postDataJSON();
+    await route.fulfill({ status: 202, json: { ...run, status: "QUEUED" } });
+  });
+
+  await page.goto("/summary");
+  await expect(page.getByLabel("Start date")).toHaveCount(0);
+  const book = page.getByLabel("Buku periode");
+  await book.selectOption(augustId);
+  await expect.poll(() => queried.at(-1)).toBe("2026-07-24..2026-08-23");
+  await page.getByRole("button", { name: "Generate payroll" }).click();
+  await expect
+    .poll(() => body)
+    .toEqual({
+      periodId: augustId,
+      attendancePeriodId: attendanceId,
+    });
 });
 
 test("versi harga dipilih per machine group sebelum generate, default versi aktif terbaru", async ({
@@ -619,4 +707,76 @@ test("payroll yang dibatalkan tidak terlihat seperti masih menghitung", async ({
     page.getByRole("heading", { name: "Payroll dibatalkan" }),
   ).toBeVisible();
   await expect(page.getByText("Payroll sedang dihitung")).toBeHidden();
+});
+
+test("tanpa payroll, Summary menunjuk ke form generate di atasnya", async ({
+  page,
+}) => {
+  await page.route("**/payroll-runs?pageSize=25", (route) =>
+    route.fulfill({
+      json: {
+        data: [],
+        page: { pageSize: 25, hasNextPage: false, nextCursor: null },
+      },
+    }),
+  );
+  await page.goto("/summary");
+  const empty = page.getByRole("region", { name: "Belum ada payroll" });
+  await expect(empty).toBeVisible();
+  // The step is the generate form above, so the empty state adds no button.
+  await expect(empty.getByRole("button")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Generate payroll" }),
+  ).toBeVisible();
+  for (const [name, width, height] of [
+    ["desktop", 1440, 900],
+    ["mobile", 390, 780],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    await page.screenshot({ path: `test-results/empty-summary-${name}.png` });
+  }
+});
+
+test("pagination Summary menempel di bawah layar saat tabelnya panjang", async ({
+  page,
+}) => {
+  const many = Array.from({ length: 60 }, (_, index) => ({
+    ...summaries[index % summaries.length]!,
+    pin: String(2000 + index),
+    employeeName: `Operator ${index + 1}`,
+  }));
+  await page.route(`**/payroll-runs/${runId}/summaries?*`, (route) =>
+    route.fulfill({
+      json: {
+        data: many,
+        page: { pageSize: 100, hasNextPage: true, nextCursor: "next" },
+        aggregate: {
+          totalBasePay: "8286129",
+          totalBonusPay: "1000",
+          totalPay: "8287129",
+          totalWorkingDays: "49",
+        },
+      },
+    }),
+  );
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1024, height: 768 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto("/summary");
+    await expect(page.getByText("Operator 60")).toBeAttached();
+    const pager = page.locator("footer").filter({ hasText: "Berikutnya" });
+    // Before and after scrolling: always on screen, pinned to its bottom.
+    for (const scroll of [0, 800]) {
+      await page.mouse.wheel(0, scroll);
+      await expect(pager).toBeInViewport();
+      const box = (await pager.boundingBox())!;
+      expect(box.y + box.height).toBeGreaterThan(viewport.height - 4);
+      expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
+    }
+    await page.screenshot({
+      path: `test-results/summary-sticky-${viewport.width}.png`,
+    });
+  }
 });

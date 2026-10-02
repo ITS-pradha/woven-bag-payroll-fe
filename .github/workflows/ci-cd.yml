@@ -1,0 +1,72 @@
+name: Frontend CI/CD
+
+# CI runs on every push/PR to main and staging. A push to `staging` (or a
+# manual run) also deploys the static build to woven-pay-staging.pradha.co.id
+# through the self-hosted runner on the VPS, which runs as its-pkp.
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+  workflow_dispatch:
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_DIR: /var/www/node/woven-payroll-staging/fe
+
+jobs:
+  ci:
+    name: Lint, test, build
+    runs-on: ubuntu-latest
+    env:
+      # Same-origin: nginx proxies /api to the backend.
+      VITE_API_BASE_URL: /api/v1
+      VITE_ENABLE_API_MOCKING: "false"
+      # Must equal PRODUCTION_DEPARTMENT_CODE in the backend .env.
+      VITE_PRODUCTION_DEPARTMENT_CODE: KARUNG
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+          retention-days: 7
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: ci
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/staging')
+    runs-on: [self-hosted, woven-payroll-fe-staging]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+
+      - name: Publish static files
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          # Assets first, index.html last, so a visitor never gets an
+          # index.html that points at files not uploaded yet.
+          rsync -a --exclude 'index.html' dist/ "$APP_DIR/"
+          rsync -a dist/index.html "$APP_DIR/index.html"
+          # Drop files from older builds.
+          rsync -a --delete dist/ "$APP_DIR/"
+
+      - name: Smoke test
+        run: curl -fsS -o /dev/null -w "%{http_code}\n" --resolve woven-pay-staging.pradha.co.id:443:127.0.0.1 https://woven-pay-staging.pradha.co.id/

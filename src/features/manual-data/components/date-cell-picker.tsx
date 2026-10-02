@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import type { DateCellAnchor } from "./univer-grid";
+import type { CellAnchor } from "./univer-grid";
 
 /**
  * Native datetime picker for the Shift Start / Shift End cells.
@@ -20,7 +20,7 @@ export function DateCellPicker({
   onApply,
   onDismiss,
 }: {
-  anchor: DateCellAnchor;
+  anchor: CellAnchor;
   onApply(value: string): void;
   onDismiss(): void;
 }) {

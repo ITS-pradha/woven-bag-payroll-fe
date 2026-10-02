@@ -17,6 +17,11 @@ import {
 import { SummaryMetrics } from "./summary-metrics";
 import { SummaryTable, type SummaryDraftValue } from "./summary-table";
 import { SummaryToolbar, type SummaryViewFilter } from "./summary-toolbar";
+import {
+  MetricsSkeleton,
+  TableSkeleton,
+} from "../../../components/skeleton/skeleton";
+import { SUMMARY_COLUMNS } from "../model/table-layout";
 
 const terminalStatuses = new Set(["GENERATED", "REVIEWED", "LOCKED"]);
 
@@ -232,13 +237,7 @@ export function SummaryWorkspace({
 
   if (!ready) return <RunProgress run={run} />;
   if (summariesQuery.isPending)
-    return (
-      <div
-        aria-busy="true"
-        aria-label="Memuat summary"
-        className="h-72 animate-pulse border border-border bg-surface-muted"
-      />
-    );
+    return <SummaryLoading label="Memuat summary" />;
   if (summariesQuery.isError)
     return <ErrorState onRetry={() => void summariesQuery.refetch()} />;
 
@@ -431,7 +430,7 @@ function Pagination({
   onNext: () => void;
 }) {
   return (
-    <footer className="flex items-center justify-end gap-2 border border-border bg-surface px-2 py-1 text-[0.6875rem]">
+    <footer className="sticky bottom-0 z-10 shadow-[0_-4px_8px_-6px_rgb(15_23_42/0.25)] flex items-center justify-end gap-2 border border-border bg-surface px-2 py-1 text-[0.6875rem]">
       <label>
         Baris{" "}
         <select
@@ -463,5 +462,32 @@ function Pagination({
         Berikutnya
       </button>
     </footer>
+  );
+}
+
+/** Metrik + tabel Summary dalam bentuk kerangka; datanya muncul di tempat. */
+export function SummaryLoading({ label }: { label: string }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <MetricsSkeleton count={5} />
+      <TableSkeleton
+        label={label}
+        height="calc(100vh - 24rem)"
+        columns={SUMMARY_COLUMNS}
+        align={[
+          "center",
+          "start",
+          "start",
+          "end",
+          "end",
+          "end",
+          "end",
+          "end",
+          "end",
+          "start",
+          "center",
+        ]}
+      />
+    </div>
   );
 }

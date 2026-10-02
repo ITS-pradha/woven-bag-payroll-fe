@@ -1,9 +1,12 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { listDetailPayrollRuns, type PayrollSummary } from "../api/detail-api";
 import { DetailSelector } from "./detail-selector";
 import { DetailWorkspace, type DetailTab } from "./detail-workspace";
+import { SelectorSkeleton } from "../../../components/skeleton/skeleton";
+import { EmptyState } from "../../../components/empty-state/empty-state";
+import { DetailEmptyBackdrop } from "./detail-empty-backdrop";
 
 export function DetailPage({ canRead }: { canRead: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -85,13 +88,7 @@ export function DetailPage({ canRead }: { canRead: boolean }) {
 }
 
 function LoadingRuns() {
-  return (
-    <div
-      aria-busy="true"
-      aria-label="Memuat histori payroll"
-      className="h-14 animate-pulse border border-border bg-surface-muted"
-    />
-  );
+  return <SelectorSkeleton label="Memuat histori payroll" />;
 }
 
 function ErrorRuns({ onRetry }: { onRetry: () => void }) {
@@ -114,25 +111,32 @@ function ErrorRuns({ onRetry }: { onRetry: () => void }) {
 
 function EmptyRuns() {
   return (
-    <section className="border border-border bg-surface p-6 text-center">
-      <h2 className="text-sm font-bold">Belum ada payroll</h2>
-      <p className="mt-1 text-xs text-muted">
-        Generate payroll di menu Summary sebelum membuka Detail.
-      </p>
-    </section>
+    <EmptyState
+      id="detail-empty-runs"
+      icon="payroll"
+      title="Belum ada payroll"
+      description="Generate payroll di menu Summary sebelum membuka Detail."
+      action={
+        <Link to="/summary" className="empty-state-primary">
+          Buka Summary
+        </Link>
+      }
+      backdrop={<DetailEmptyBackdrop />}
+      fill
+    />
   );
 }
 
 function PickEmployee() {
   return (
-    <section className="flex min-h-64 items-center justify-center border border-border bg-surface p-6 text-center">
-      <div>
-        <h2 className="text-sm font-bold">Pilih karyawan</h2>
-        <p className="mt-1 text-xs text-muted">
-          Cari nama atau PIN pada kolom di atas untuk melihat rincian payroll.
-        </p>
-      </div>
-    </section>
+    <EmptyState
+      id="detail-pick-employee"
+      icon="person"
+      title="Pilih karyawan"
+      description="Cari nama atau PIN pada kolom di atas untuk melihat rincian payroll."
+      backdrop={<DetailEmptyBackdrop />}
+      fill
+    />
   );
 }
 

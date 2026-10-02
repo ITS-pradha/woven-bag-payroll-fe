@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
-import { parseImportFile } from "./rows";
+import { normalizeDateInput, parseImportFile } from "./rows";
 import { isXlsxFile } from "./xlsx-file";
 import { xlsxToText } from "./xlsx-import";
 
@@ -22,10 +22,12 @@ function workbook(options: {
   sheets: { name: string; xml: string }[];
   sharedStrings?: string;
   absoluteTargets?: boolean;
+  workbookPr?: string;
+  styles?: string;
 }) {
   const files: Record<string, Uint8Array> = {
     "xl/workbook.xml": strToU8(
-      `<workbook xmlns="${MAIN}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${options.sheets
+      `<workbook xmlns="${MAIN}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${options.workbookPr ?? ""}<sheets>${options.sheets
         .map(
           (s, i) =>
             `<sheet name="${s.name}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`,
@@ -49,6 +51,10 @@ function workbook(options: {
   if (options.sharedStrings)
     files["xl/sharedStrings.xml"] = strToU8(
       `<sst xmlns="${MAIN}">${options.sharedStrings}</sst>`,
+    );
+  if (options.styles)
+    files["xl/styles.xml"] = strToU8(
+      `<styleSheet xmlns="${MAIN}">${options.styles}</styleSheet>`,
     );
   return zipSync(files);
 }
@@ -167,6 +173,36 @@ describe("xlsxToText", () => {
       "46269.2916666667",
       "100000000000000000000",
     ]);
+  });
+
+  it("baris kosong yang tidak ditulis Excel tetap terhitung (nomor baris file)", () => {
+    const data = workbook({
+      sheets: [
+        {
+          name: "Data",
+          xml: `<row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>b</t></is></c></row>`,
+        },
+      ],
+    });
+    expect(xlsxToText(data).text.split("\n")).toEqual(["a", "", "", "b"]);
+  });
+
+  it("workbook date1904: serial tanggal digeser 1462 hari, angka biasa tidak", () => {
+    const data = workbook({
+      workbookPr: `<workbookPr date1904="1"/>`,
+      styles: `<numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd hh:mm"/></numFmts><cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="164"/><xf numFmtId="22"/></cellXfs>`,
+      sheets: [
+        {
+          name: "Data",
+          // 44807.2916… di sistem 1904 = 2026-09-04 07:00.
+          xml: `<row r="1"><c r="A1" s="1"><v>44807.291666666664</v></c><c r="B1" s="2"><v>44807.625</v></c><c r="C1"><v>982</v></c></row>`,
+        },
+      ],
+    });
+    const [start, end, result] = xlsxToText(data).text.split("\t");
+    expect(normalizeDateInput(start!)).toBe("2026-09-04 07:00:00");
+    expect(normalizeDateInput(end!)).toBe("2026-09-04 15:00:00");
+    expect(result).toBe("982");
   });
 
   it("file .xls lama atau bukan zip ditolak dengan langkah perbaikannya", () => {

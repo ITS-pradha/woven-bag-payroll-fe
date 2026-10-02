@@ -38,7 +38,8 @@ const SSO_ERROR_MESSAGES: Record<string, string> = {
   consent_required: "Permintaan akses belum disetujui di Portal.",
   login_required: "Sesi Portal sudah berakhir. Silakan masuk lagi.",
   state_missing: "Proses login kedaluwarsa. Silakan ulangi dari awal.",
-  portal_unavailable: "Portal tidak dapat dihubungi. Coba lagi beberapa saat lagi.",
+  portal_unavailable:
+    "Portal tidak dapat dihubungi. Coba lagi beberapa saat lagi.",
   rejected: "Portal menolak permintaan login ini.",
 };
 

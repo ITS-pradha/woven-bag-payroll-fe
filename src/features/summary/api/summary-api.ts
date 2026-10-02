@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { apiClient } from "../../../api/client/api-client";
 import { unwrapApiData } from "../../../api/client/api-result";
+import { env } from "../../../config/env";
 import type { components } from "../../../api/generated/schema";
 
 const cursorPageSchema = z.object({
@@ -16,6 +17,7 @@ const payrollPeriodSchema = z.object({
   periodEnd: z.string(),
   departmentCode: z.string(),
   status: z.enum(["OPEN", "CLOSED"]),
+  rowVersion: z.number().int().positive(),
   createdAt: z.string(),
   closedAt: z.string().nullable().optional(),
 });
@@ -151,13 +153,20 @@ export interface SummaryFilter {
   after?: string;
 }
 
-export async function listPayrollPeriods(
-  filter: PeriodFilter,
-  signal?: AbortSignal,
-) {
+/**
+ * Buku periode yang sama dengan pilihan di Manual Data: departemen produksi
+ * dari env, bukan departemen HRIS. Buku dibuat dan ditutup di Manual Data;
+ * Summary hanya memilih.
+ */
+export async function listPeriodBooks(signal?: AbortSignal) {
   const data = unwrapApiData(
     await apiClient.GET("/payroll-periods", {
-      params: { query: { ...filter, pageSize: 100 } },
+      params: {
+        query: {
+          pageSize: 200,
+          departmentCode: env.VITE_PRODUCTION_DEPARTMENT_CODE,
+        },
+      },
       ...(signal ? { signal } : {}),
     }),
   );
@@ -276,22 +285,6 @@ export async function listPayrollSummaries(
 export interface IdempotentSummaryMutation<TBody> {
   key: string;
   body: TBody;
-}
-
-export async function createPayrollPeriod(
-  attempt: IdempotentSummaryMutation<
-    components["schemas"]["CreatePayrollPeriodRequest"]
-  >,
-  csrfToken: string,
-) {
-  const data = unwrapApiData(
-    await apiClient.POST("/payroll-periods", {
-      params: { header: { "Idempotency-Key": attempt.key } },
-      headers: { "X-CSRF-Token": csrfToken },
-      body: attempt.body,
-    }),
-  );
-  return contract(payrollPeriodSchema, data);
 }
 
 export async function createHrisSync(

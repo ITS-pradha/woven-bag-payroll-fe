@@ -3,9 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { DateCellPicker } from "./date-cell-picker";
-import type { DateCellAnchor } from "./univer-grid";
+import type { CellAnchor } from "./univer-grid";
 
-const anchor: DateCellAnchor = {
+const anchor: CellAnchor = {
   row: 3,
   column: 1,
   left: 200,
@@ -14,7 +14,7 @@ const anchor: DateCellAnchor = {
   value: "2026-09-14 07:00:00",
 };
 
-function renderPicker(overrides: Partial<DateCellAnchor> = {}) {
+function renderPicker(overrides: Partial<CellAnchor> = {}) {
   const onApply = vi.fn();
   const onDismiss = vi.fn();
   render(

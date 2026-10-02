@@ -35,6 +35,12 @@ export function EmployeePicker({
     retry: false,
   });
   const data = employees.data?.data ?? [];
+  /**
+   * The list answers the text in the box. While the debounce or the request
+   * is still catching up it answers the previous text, and Enter would pick
+   * that list's first row — an employee nobody searched for.
+   */
+  const settled = search.trim() === debounced && !employees.isFetching;
   function choose(employee: Employee) {
     onSelect(employee);
     setSearch("");
@@ -79,9 +85,10 @@ export function EmployeePicker({
             event.preventDefault();
             setActive((index) => Math.max(0, index - 1));
           }
-          if (event.key === "Enter" && open && data[active]) {
+          if (event.key === "Enter" && open) {
             event.preventDefault();
-            choose(data[active]);
+            const employee = data[active];
+            if (settled && employee) choose(employee);
           }
         }}
       />

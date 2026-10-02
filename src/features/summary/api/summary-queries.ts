@@ -1,9 +1,9 @@
 import { queryOptions } from "@tanstack/react-query";
 
 import {
+  listPeriodBooks,
   getPayrollRun,
   listFinalAttendancePeriods,
-  listPayrollPeriods,
   listPayrollSummaries,
   listSelectableRateVersions,
   type PeriodFilter,
@@ -24,10 +24,13 @@ export function payrollRunQueryOptions(runId: string) {
   });
 }
 
-export function payrollPeriodsQueryOptions(filter: PeriodFilter) {
+/** Prefiks `payroll-periods`: invalidasi dari Manual Data ikut menyegarkannya. */
+export function periodBooksQueryOptions(enabled: boolean) {
   return queryOptions({
-    queryKey: ["payroll-periods", filter],
-    queryFn: ({ signal }) => listPayrollPeriods(filter, signal),
+    queryKey: ["payroll-periods", "books"],
+    queryFn: ({ signal }) => listPeriodBooks(signal),
+    enabled,
+    staleTime: 60_000,
   });
 }
 

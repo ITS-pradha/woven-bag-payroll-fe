@@ -26,7 +26,11 @@ function errorMessageOf(error: unknown): string {
   return "Login belum berhasil. Silakan coba lagi.";
 }
 
-export function LoginForm({ onPasswordLogin, onSsoLogin, ssoError = null }: LoginFormProps) {
+export function LoginForm({
+  onPasswordLogin,
+  onSsoLogin,
+  ssoError = null,
+}: LoginFormProps) {
   const [pin, setPin] = useState("");
   const [password, setPassword] = useState("");
   const [rememberMe, setRememberMe] = useState(false);
