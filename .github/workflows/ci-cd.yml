@@ -22,8 +22,10 @@ jobs:
     name: Lint, test, build
     runs-on: ubuntu-latest
     env:
-      # Same-origin: nginx proxies /api to the backend.
-      VITE_API_BASE_URL: /api/v1
+      # Backend has its own host; it must list this app's origin in
+      # ALLOWED_ORIGINS. Both are under pradha.co.id, so SameSite=Lax
+      # session cookies still travel with credentialed requests.
+      VITE_API_BASE_URL: https://woven-pay-staging-be.pradha.co.id/api/v1
       VITE_ENABLE_API_MOCKING: "false"
       # Must equal PRODUCTION_DEPARTMENT_CODE in the backend .env.
       VITE_PRODUCTION_DEPARTMENT_CODE: KARUNG
